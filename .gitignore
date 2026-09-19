@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+target/
+build/
+!**/src/main/**/target/
+!**/src/test/**/target/
+!**/src/main/**/build/
+!**/src/test/**/build/
+.kotlin
+
+# ---------------------------------------------------------------------------
+# Maven wrapper: keep the wrapper scripts, ignore downloaded distributions
+# ---------------------------------------------------------------------------
+.mvn/wrapper/maven-wrapper.jar
+.mvn/wrapper/maven-wrapper.properties
+
+# ---------------------------------------------------------------------------
+# IDEs - project-local state only, never the whole workspace
+# ---------------------------------------------------------------------------
+### IntelliJ IDEA ###
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+### Eclipse ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+### VS Code ###
+.vscode/
+
+# ---------------------------------------------------------------------------
+# OS / editor noise
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*~
+*.swp
+
+# ---------------------------------------------------------------------------
+# Local configuration that may hold database credentials
+# ---------------------------------------------------------------------------
+*.local.properties
+.env
