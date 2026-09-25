@@ -47,6 +47,13 @@ public final class DBConnection {
 
     private static final Pattern IDENTIFIER = Pattern.compile("^[A-Za-z0-9_$]+$");
 
+    /**
+     * MySQL error codes that must not be mistaken for "the database is missing".
+     * 1044 = access denied for user to database, 1045 = access denied for user.
+     */
+    private static final int ACCESS_DENIED_FOR_DATABASE = 1044;
+    private static final int ACCESS_DENIED = 1045;
+
     /** Set only after the schema bootstrap has fully succeeded. */
     private static final AtomicBoolean SCHEMA_READY = new AtomicBoolean(false);
 
@@ -101,7 +108,21 @@ public final class DBConnection {
         try (Connection probe = DriverManager.getConnection(databaseUrl(), USER, PASSWORD)) {
             return;
         } catch (SQLException notReady) {
-            // Fall through and try to create it.
+            int code = notReady.getErrorCode();
+            /*
+             * Only a genuinely missing database justifies a CREATE. When the server
+             * rejected the credentials, the CREATE would fail too and the teacher would be
+             * told to "grant the CREATE privilege" - sending them to look at the wrong
+             * problem when the password is simply wrong.
+             */
+            if (code == ACCESS_DENIED_FOR_DATABASE || code == ACCESS_DENIED) {
+                throw new SQLException("MySQL refused the login for user '" + USER + "' on "
+                        + HOST + ":" + PORT + " (error " + code + "). Check the credentials: system "
+                        + "properties quizmaster.db.user / quizmaster.db.password, or environment "
+                        + "variables QUIZMASTER_DB_USER / QUIZMASTER_DB_PASSWORD. Server said: "
+                        + notReady.getMessage(), notReady);
+            }
+            // Anything else: fall through and try to create the database.
         }
 
         if (!IDENTIFIER.matcher(DATABASE).matches()) {
@@ -170,6 +191,8 @@ public final class DBConnection {
                     + "class_id INT NULL, "
                     + "is_public BOOLEAN NOT NULL DEFAULT TRUE, "
                     + "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+                    + "KEY idx_tests_created_by (created_by), "
+                    + "KEY idx_tests_class_id (class_id), "
                     + "FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE, "
                     + "FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE SET NULL"
                     + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
@@ -186,6 +209,7 @@ public final class DBConnection {
                     + "correct_option CHAR(1) NOT NULL, "
                     + "topic VARCHAR(100) NOT NULL DEFAULT 'General', "
                     + "difficulty VARCHAR(10) NOT NULL DEFAULT 'MEDIUM', "
+                    + "KEY idx_questions_test_id (test_id), "
                     + "FOREIGN KEY (test_id) REFERENCES tests(id) ON DELETE CASCADE"
                     + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
@@ -198,6 +222,8 @@ public final class DBConnection {
                     + "total INT NOT NULL DEFAULT 0, "
                     + "overtime_seconds INT NOT NULL DEFAULT 0, "
                     + "taken_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+                    + "KEY idx_results_student_id (student_id), "
+                    + "KEY idx_results_test_id (test_id), "
                     + "FOREIGN KEY (test_id) REFERENCES tests(id) ON DELETE CASCADE, "
                     + "FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE CASCADE"
                     + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
@@ -209,6 +235,15 @@ public final class DBConnection {
             migrateIgnoringDuplicate(st, "ALTER TABLE tests ADD COLUMN is_public BOOLEAN DEFAULT TRUE");
             migrateIgnoringDuplicate(st, "ALTER TABLE tests ADD CONSTRAINT fk_tests_class "
                     + "FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE SET NULL");
+
+            // 8. The index declarations above only apply to a database created from
+            //    scratch. These bring an existing database in line with schema.sql, which
+            //    declares the same five indexes; a duplicate index name (1061) is ignored.
+            migrateIgnoringDuplicate(st, "ALTER TABLE tests ADD INDEX idx_tests_created_by (created_by)");
+            migrateIgnoringDuplicate(st, "ALTER TABLE tests ADD INDEX idx_tests_class_id (class_id)");
+            migrateIgnoringDuplicate(st, "ALTER TABLE questions ADD INDEX idx_questions_test_id (test_id)");
+            migrateIgnoringDuplicate(st, "ALTER TABLE results ADD INDEX idx_results_student_id (student_id)");
+            migrateIgnoringDuplicate(st, "ALTER TABLE results ADD INDEX idx_results_test_id (test_id)");
         }
     }
 

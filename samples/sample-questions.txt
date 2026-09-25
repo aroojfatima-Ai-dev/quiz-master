@@ -1,0 +1,44 @@
+Q: What is the capital of France?
+A) Berlin
+B) Paris
+C) Madrid
+D) Rome
+Answer: B
+Topic: Geography
+Difficulty: EASY
+
+Q: Which keyword declares a constant in Java?
+A) static
+B) final
+C) const
+D) var
+Answer: B
+Topic: Java Basics
+Difficulty: MEDIUM
+
+Q: Which data structure works on the principle of first in, first out?
+A) Stack
+B) Queue
+C) Binary tree
+D) Hash map
+Answer: Queue
+Topic: Data Structures
+Difficulty: EASY
+
+Q: What is the time complexity of binary search on a sorted array?
+A) O(n)
+B) O(n log n)
+C) O(log n)
+D) O(1)
+Answer: C
+Topic: Algorithms
+Difficulty: Hard (level 3)
+
+Q: Which of these is NOT a primitive type in Java?
+A) int
+B) boolean
+C) String
+D) double
+Answer: C
+Topic: Java Basics
+Difficulty: MEDIUM

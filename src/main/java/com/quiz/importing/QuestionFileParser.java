@@ -45,10 +45,14 @@ import java.util.regex.Pattern;
  * it started on, and is skipped.
  *
  * <p>Tolerance is limited on purpose. Accepted keyword spellings are {@code Q:},
- * {@code Q1:}, {@code Question 2:}, {@code Answer:}, {@code Ans:}, {@code Topic:} and
- * {@code Difficulty:}, each with {@code :}, {@code )} or {@code .} as the separator;
- * options may be written {@code A)}, {@code A.} or {@code A:} in either case. The
- * parser never throws: malformed input becomes failures, not exceptions.
+ * {@code Q1:}, {@code Question 2:}, {@code Answer:}, {@code Ans:}, {@code Topic:},
+ * {@code Difficulty:} (and {@code Level:} / {@code Diff:}), each with {@code :},
+ * {@code )}, {@code .} or {@code -} as the separator; options may be written
+ * {@code A)}, {@code A.}, {@code A:} or {@code (A)} in either case. A whole question on
+ * one line is expanded into its fields, an answer may be written out instead of as a
+ * letter ({"Answer: Paris"}), and the invisible characters a PDF leaves behind (page
+ * breaks, non-breaking spaces, a byte order mark) are removed. The parser never throws:
+ * malformed input becomes failures, not exceptions.
  */
 public final class QuestionFileParser {
 
@@ -91,6 +95,28 @@ public final class QuestionFileParser {
     private static final Pattern OPTION_LINE =
             Pattern.compile("^\\s*\\(?\\s*([A-Da-d])\\s*[).:]\\s*(.*)$");
 
+    /**
+     * A complete question written on one line: {@code Q: ... A) ... B) ... C) ... D) ...
+     * Answer: B}. Option markers are recognised after whitespace, and {@code (A)} is
+     * deliberately not accepted here - a question such as "which part is (B)?" would
+     * otherwise be cut in half.
+     */
+    private static final Pattern INLINE_OPTION =
+            Pattern.compile("(?<!\\S)([A-Da-d])\\s*[).:]");
+
+    /**
+     * Every label that can start a field inside a line: the keyword labels and the option
+     * markers. Used only to cut an inline question into its fields, so the patterns are
+     * anchored on a non-word character before the label (or whitespace for an option).
+     */
+    private static final Pattern INLINE_MARKER = Pattern.compile(
+            "(?<![\\p{Alnum}])"
+                    + "(?:(?i:question|q)\\s*\\.?\\s*\\d{0,4}\\s*[:).\\]-]"
+                    + "|(?i:(?:correct\\s+)?ans(?:wer)?)\\s*[:).\\]-]"
+                    + "|(?i:topic)\\s*[:).\\]-]"
+                    + "|(?i:difficulty|diff|level)\\s*[:).\\]-]"
+                    + "|(?<!\\S)[A-D]\\s*[).:])");
+
     private static final String[] OPTION_LETTERS = { "A", "B", "C", "D" };
 
     private static final String DEFAULT_TOPIC = "General";
@@ -116,7 +142,7 @@ public final class QuestionFileParser {
         }
 
         String text = normalise(rawText);
-        String[] lines = text.split("\n", -1);
+        String[] lines = expandInlineQuestions(text).split("\n", -1);
 
         Block current = null;
         boolean capReported = false;
@@ -299,6 +325,12 @@ public final class QuestionFileParser {
 
         String correctOption = extractAnswerLetter(block.answer.toString());
         if (correctOption == null) {
+            // Not a letter: it may be the answer written out ("Answer: Paris"). That is
+            // not the documented format, but it is a common way to fill the file in by
+            // hand, so it is accepted when exactly one option matches the text.
+            correctOption = matchAnswerText(block.answer.toString(), options);
+        }
+        if (correctOption == null) {
             failures.add(new ParseFailure(block.startLine,
                     block.answer.length() == 0
                             ? "Missing 'Answer:' line (expected \"Answer: A\", \"Answer: B\", \"Answer: C\" or \"Answer: D\")."
@@ -339,17 +371,54 @@ public final class QuestionFileParser {
             return null;
         }
 
-        String[] tokens = trimmed.split("[\\s,;/]+");
-        for (String token : tokens) {
-            String bare = stripPunctuation(token);
-            if (bare.length() == 1 && "ABCDabcd".indexOf(bare.charAt(0)) >= 0) {
-                return bare.toUpperCase(Locale.ROOT);
-            }
+        // 1. The whole value is the letter: "B", " b ", "(c)".
+        String bare = stripPunctuation(trimmed);
+        if (bare.length() == 1 && "ABCDabcd".indexOf(bare.charAt(0)) >= 0) {
+            return bare.toUpperCase(Locale.ROOT);
+        }
+
+        // 2. The value starts with the letter and a marker: "B)", "A.", "A - the first one",
+        //    "(c) beta". Only an upper-case letter is accepted here, so that an answer
+        //    written as a sentence ("Pacific Ocean - ...") is not read as option A because
+        //    of the word "a" somewhere inside it.
+        Matcher leading = LEADING_ANSWER.matcher(trimmed);
+        if (leading.find()) {
+            return leading.group(1);
+        }
+
+        // 3. The letter follows the word "answer" or "option": "Correct answer is B".
+        Matcher phrased = PHRASED_ANSWER.matcher(trimmed);
+        if (phrased.find()) {
+            return phrased.group(1);
         }
         return null;
     }
 
-    /** Normalises a difficulty, falling back to MEDIUM for anything unrecognised. */
+    /**
+     * {@code "B)"}, {@code "A."}, {@code "A - the first one"}, {@code "(c) beta"} and the
+     * placeholder {@code "<A, B, C, or D>"} from the documented format.
+     */
+    private static final Pattern LEADING_ANSWER =
+            Pattern.compile("^[\\[(<]?\\s*([A-D])\\s*[:).\\],;-]");
+
+    /**
+     * {@code "Correct answer is B"}, {@code "answer: C"}, {@code "option D"}.
+     *
+     * <p>The letter must be upper-case: "the answer is a good one" is a sentence, not a
+     * reference to option A.
+     */
+    private static final Pattern PHRASED_ANSWER = Pattern.compile(
+            "(?i:\\b(?:correct\\s+)?ans(?:wer)?|\\boption)\\b\\s*(?:is|was|=|:)?\\s*[\\[(]?\\s*([A-D])\\b");
+
+    /**
+     * Normalises a difficulty, falling back to MEDIUM for anything unrecognised.
+     *
+     * <p>The three documented values win outright. Common synonyms and abbreviations are
+     * mapped as well ({@code Easy}, {@code Difficult}, {@code Med}, {@code Hard (level 3)}),
+     * so a small wording difference does not quietly turn a HARD question into a MEDIUM
+     * one. Only the first word is inspected, and anything still unrecognised takes the
+     * documented MEDIUM fallback rather than costing the teacher the question.
+     */
     private static String normaliseDifficulty(String rawDifficulty) {
         String value = rawDifficulty == null ? "" : rawDifficulty.strip().toUpperCase(Locale.ROOT);
         switch (value) {
@@ -358,8 +427,151 @@ public final class QuestionFileParser {
             case "HARD":
                 return value;
             default:
+                break;
+        }
+
+        String firstWord = value.split("[\\s,;(-]+", 2)[0];
+        switch (firstWord) {
+            case "EASY":
+            case "EAS":
+            case "SIMPLE":
+            case "LOW":
+            case "BASIC":
+                return "EASY";
+            case "MEDIUM":
+            case "MED":
+            case "MOD":
+            case "MODERATE":
+            case "INTERMEDIATE":
+            case "NORMAL":
+                return "MEDIUM";
+            case "HARD":
+            case "DIFF":
+            case "DIFFICULT":
+            case "HIGH":
+            case "ADVANCED":
+                return "HARD";
+            default:
                 return DEFAULT_DIFFICULTY;
         }
+    }
+
+    /**
+     * Matches an answer that was written out instead of given as a letter.
+     *
+     * <p>Accepts an exact match of an option's text, or an option text followed by extra
+     * words ("Mars" for the answer "Mars (the fourth planet)"). If two options fit, the
+     * answer is ambiguous and null is returned so the caller reports it at the block's
+     * line number instead of guessing.
+     */
+    private static String matchAnswerText(String rawAnswer, String[] options) {
+        String wanted = collapse(rawAnswer);
+        if (wanted.isEmpty()) {
+            return null;
+        }
+
+        String match = null;
+        for (int i = 0; i < options.length; i++) {
+            String optionText = collapse(options[i]);
+            if (optionText.isEmpty()) {
+                continue;
+            }
+            if (optionText.equals(wanted) || wanted.startsWith(optionText + " ")) {
+                if (match != null) {
+                    return null; // Two options fit - do not guess.
+                }
+                match = OPTION_LETTERS[i];
+            }
+        }
+        return match;
+    }
+
+    /** Lower-cases and collapses whitespace, for comparing two pieces of free text. */
+    private static String collapse(String value) {
+        return value == null ? "" : value.strip().replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+    }
+
+    // ------------------------------------------------------------------
+    // Inline (single-line) questions
+    // ------------------------------------------------------------------
+
+    /**
+     * Expands every question that was written on a single line into the one-field-per-line
+     * shape the main loop expects.
+     *
+     * <p>Text files in particular are often written as
+     * {@code Q: Capital of France? A) Berlin B) Paris C) Madrid D) Rome Answer: B}. A line
+     * is only split when it holds all four option markers {@code A) B) C) D)} in order and
+     * the first of them is not at the start of the line, so an ordinary file - one field
+     * per line - is left exactly as it is.
+     */
+    private static String expandInlineQuestions(String text) {
+        StringBuilder expanded = new StringBuilder(text.length());
+        String[] lines = text.split("\n", -1);
+
+        for (int i = 0; i < lines.length; i++) {
+            if (i > 0) {
+                expanded.append('\n');
+            }
+            List<String> fields = splitInlineQuestion(lines[i]);
+            if (fields == null) {
+                expanded.append(lines[i]);
+                continue;
+            }
+            expanded.append(String.join("\n", fields));
+        }
+        return expanded.toString();
+    }
+
+    /**
+     * @return the fields of an inline question, or null when the line is not one
+     */
+    private static List<String> splitInlineQuestion(String line) {
+        if (line.indexOf(')') < 0 && line.indexOf('.') < 0 && line.indexOf(':') < 0) {
+            return null; // No marker can be present at all.
+        }
+
+        Matcher option = INLINE_OPTION.matcher(line);
+        int expected = 0;
+        boolean sawFirstOption = false;
+        boolean firstOptionIsMidLine = false;
+
+        while (option.find()) {
+            String letter = option.group(1).toUpperCase(Locale.ROOT);
+            if (letter.charAt(0) - 'A' == expected) {
+                if (!sawFirstOption) {
+                    sawFirstOption = true;
+                    firstOptionIsMidLine = option.start() > 0;
+                }
+                expected++;
+                if (expected == OPTION_LETTERS.length) {
+                    break;
+                }
+            }
+        }
+        if (expected < OPTION_LETTERS.length || !firstOptionIsMidLine) {
+            return null;
+        }
+
+        List<String> fields = new ArrayList<>();
+        Matcher marker = INLINE_MARKER.matcher(line);
+        int previousEnd = 0;
+        while (marker.find()) {
+            if (marker.start() > previousEnd) {
+                String field = line.substring(previousEnd, marker.start()).strip();
+                if (!field.isEmpty()) {
+                    fields.add(field);
+                }
+            }
+            previousEnd = marker.start();
+        }
+        if (previousEnd < line.length()) {
+            String field = line.substring(previousEnd).strip();
+            if (!field.isEmpty()) {
+                fields.add(field);
+            }
+        }
+        return fields.size() > 1 ? fields : null;
     }
 
     // ------------------------------------------------------------------
@@ -377,8 +589,16 @@ public final class QuestionFileParser {
                 .replace("\r\n", "\n")
                 .replace('\r', '\n')
                 .replace('\u00A0', ' ')   // non-breaking space
+                .replace('\u2007', ' ')   // figure space
+                .replace('\u202F', ' ')   // narrow no-break space
+                .replace('\u200B', ' ')   // zero-width space
                 .replace('\u2028', '\n')  // line separator
-                .replace('\u2029', '\n'); // paragraph separator
+                .replace('\u2029', '\n')  // paragraph separator
+                // A form feed is where a PDF page ends. Left in place it would glue the
+                // last line of one page to the first line of the next, and the second
+                // question would be swallowed as continuation text of the first.
+                .replace('\f', '\n')
+                .replace('\u000B', '\n'); // vertical tab
 
         // A UTF-8 BOM saved by a Windows editor would otherwise sit in front of the
         // first "Q:" and stop the very first question from matching.

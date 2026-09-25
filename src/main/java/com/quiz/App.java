@@ -64,6 +64,16 @@ public class App extends Application {
     private List<Animation> pendingAnimations = new ArrayList<>();
 
     /**
+     * Countdown of the test being taken, if any.
+     *
+     * <p>The quiz timer deliberately survives page navigation (it must not restart when a
+     * student moves between questions), so it is not part of {@link #liveAnimations}. That
+     * means it has to be stopped explicitly whenever it stops being relevant - see
+     * {@link #stopQuizTimer()}.
+     */
+    private Timeline quizTimerTimeline;
+
+    /**
      * Animations belonging to the root currently displayed. They are stopped when
      * that root is replaced - see {@link #setScreenRoot}.
      */
@@ -183,10 +193,25 @@ public class App extends Application {
      */
     @Override
     public void stop() {
+        stopQuizTimer();
         stopAnimations(liveAnimations);
         stopAnimations(pendingAnimations);
         liveAnimations = new ArrayList<>();
         pendingAnimations = new ArrayList<>();
+    }
+
+    /**
+     * Stops the countdown of a test that is no longer being taken.
+     *
+     * <p>An {@code INDEFINITE} JavaFX animation keeps firing until it is stopped, so a
+     * countdown left behind by a test would keep ticking once a second for the rest of the
+     * session and keep the stage alive after the window was closed.
+     */
+    private void stopQuizTimer() {
+        if (quizTimerTimeline != null) {
+            quizTimerTimeline.stop();
+            quizTimerTimeline = null;
+        }
     }
 
     /** Stops every animation in the list and empties it. */
@@ -1307,6 +1332,9 @@ public class App extends Application {
             }
         });
 
+        // Set once the test has been written, so a double click cannot create it twice.
+        boolean[] alreadySaved = new boolean[]{ false };
+
         nextBtn.setOnAction(e -> {
             String questionError = InputValidator.validateQuestion(
                     questionTextField.getText(), optAField.getText(), optBField.getText(),
@@ -1315,12 +1343,28 @@ public class App extends Application {
                 showMessage(messageLabel, questionError, false);
                 return;
             }
+            // questions.topic is VARCHAR(100). Without this check a longer topic reached
+            // MySQL and came back as an unhelpful "Data too long for column 'topic'".
+            String topicError = InputValidator.validateTopic(topicField.getText());
+            if (topicError != null) {
+                showMessage(messageLabel, topicError, false);
+                return;
+            }
 
             saveCurrentQuestionToMemory.run();
             showWizardStep2QuestionScreen(stage, user, draftTest, draftQuestions, questionIndex + 1);
         });
 
         finishBtn.setOnAction(e -> {
+            if (alreadySaved[0]) {
+                return;
+            }
+            String topicError = InputValidator.validateTopic(topicField.getText());
+            if (topicError != null) {
+                showMessage(messageLabel, topicError, false);
+                return;
+            }
+
             // Save the question currently on screen, but only when it is complete.
             // This check used to look at options A and B alone, so "Finish" could
             // persist a question with blank options C and D - students then saw two
@@ -1345,8 +1389,14 @@ public class App extends Application {
                 // permanently holding only some of its questions.
                 List<Question> questions = new ArrayList<>(draftQuestions.size());
                 for (DraftQuestion q : draftQuestions) {
+                    // A blank topic falls back to "General" rather than reaching MySQL as
+                    // an empty string (the column is NOT NULL with that default).
+                    String safeTopic = q.topic == null || q.topic.trim().isEmpty()
+                            ? "General" : q.topic.trim();
+                    String safeDifficulty = q.difficulty == null || q.difficulty.trim().isEmpty()
+                            ? "MEDIUM" : q.difficulty.trim();
                     questions.add(new Question(q.questionText, q.optionA, q.optionB, q.optionC,
-                            q.optionD, q.correctOption, q.topic, q.difficulty));
+                            q.optionD, q.correctOption, safeTopic, safeDifficulty));
                 }
 
                 testDAO.createTestWithQuestions(
@@ -1354,6 +1404,7 @@ public class App extends Application {
                         draftTest.expiryAction, user.getId(),
                         draftTest.classId, draftTest.isPublic, questions
                 );
+                alreadySaved[0] = true;
 
                 String successMsg = String.format(Locale.ROOT, "Test '%s' created successfully with %d questions!",
                         draftTest.title, draftQuestions.size());
@@ -2271,7 +2322,7 @@ public class App extends Application {
                     int total = toInt(r.get("total"));
                     int overtime = toInt(r.get("overtimeSeconds"));
 
-                    Label rScore = new Label(String.format("Score: %d / %d  |  Taken At: %s", score, total, r.get("takenAt")));
+                    Label rScore = new Label(String.format(Locale.ROOT, "Score: %d / %d  |  Taken At: %s", score, total, r.get("takenAt")));
                     rScore.setFont(Font.font("Segoe UI", FontWeight.MEDIUM, 13));
                     rScore.setTextFill(Color.web("#10b981"));
 
@@ -2375,21 +2426,26 @@ public class App extends Application {
         Label timerLabel = new Label();
         timerLabel.setFont(Font.font("Segoe UI", FontWeight.BOLD, 16));
 
+        // Starting a test replaces any countdown still running from an earlier test, so a
+        // student can never end up with two timers competing over one window.
+        stopQuizTimer();
+
         Timeline timerTimeline = new Timeline();
         timerTimeline.setCycleCount(Timeline.INDEFINITE);
+        quizTimerTimeline = timerTimeline;
 
         Runnable updateTimerDisplay = () -> {
             if (!isOvertimeActive[0]) {
                 int secs = remainingSecondsHolder[0];
                 int m = secs / 60;
                 int s = secs % 60;
-                timerLabel.setText(String.format("⏱ Time Remaining: %02d:%02d", m, s));
+                timerLabel.setText(String.format(Locale.ROOT, "⏱ Time Remaining: %02d:%02d", m, s));
                 timerLabel.setTextFill(Color.web("#0284c7"));
             } else {
                 int secs = overtimeSecondsHolder[0];
                 int m = secs / 60;
                 int s = secs % 60;
-                timerLabel.setText(String.format("⚠️ Overtime: +%02d:%02d", m, s));
+                timerLabel.setText(String.format(Locale.ROOT, "⚠️ Overtime: +%02d:%02d", m, s));
                 timerLabel.setTextFill(Color.web("#ef4444"));
             }
         };
@@ -2575,7 +2631,7 @@ public class App extends Application {
         tTitle.setFont(Font.font("Segoe UI", FontWeight.MEDIUM, 15));
         tTitle.setTextFill(Color.web("#64748b"));
 
-        Label scoreDisplay = new Label(String.format("You scored %d out of %d", score, total));
+        Label scoreDisplay = new Label(String.format(Locale.ROOT, "You scored %d out of %d", score, total));
         scoreDisplay.setFont(Font.font("Segoe UI", FontWeight.BOLD, 24));
         scoreDisplay.setTextFill(Color.web("#10b981"));
 
@@ -2632,7 +2688,7 @@ public class App extends Application {
             badge.setFont(Font.font("Segoe UI", FontWeight.BOLD, 13));
             badge.setTextFill(Color.web(isCorrect ? "#16a34a" : "#dc2626"));
 
-            Label qText = new Label(String.format("Q%d. %s", (i + 1), q.get("questionText")));
+            Label qText = new Label(String.format(Locale.ROOT, "Q%d. %s", (i + 1), q.get("questionText")));
             qText.setFont(Font.font("Segoe UI", FontWeight.SEMI_BOLD, 15));
             qText.setTextFill(Color.web("#1e293b"));
             qText.setWrapText(true);

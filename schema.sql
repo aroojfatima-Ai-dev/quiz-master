@@ -115,11 +115,23 @@ CREATE TABLE IF NOT EXISTS results (
 
 -- =====================================================================
 -- Optional demo data. Uncomment to seed one teacher, one student, one
--- class and one public test. Passwords below are PBKDF2 hashes of
--- "teacher123" and "student123" produced by com.quiz.security.PasswordUtil.
+-- class and one enrolment.
+--
+-- The two hashes below are real PBKDF2-HMAC-SHA256 hashes of "teacher123"
+-- and "student123", produced by com.quiz.security.PasswordUtil with the
+-- fixed salts shown, so the accounts can actually be logged into.
+-- (They are also pinned by SchemaSeedTest, which fails the build if either
+-- value stops matching its password.)
 -- =====================================================================
 -- INSERT INTO users (username, email, password, role) VALUES
 --   ('prof_smith', 'smith@example.com',
---    'PBKDF2:210000:U2FsdGVkX1+demoSaltDemoSaltA==:ZGVtb0hhc2hWYWx1ZURlbW9IYXNoVmFsdWVEZW1vSGFzaA==', 'teacher'),
+--    'PBKDF2:210000:AAECAwQFBgcICQoLDA0ODw==:+WRaa9Yu9g8N/ZMdLu2CHwpmSSKH7ErY4Ti4IQkz84M=', 'teacher'),
 --   ('ali_student', 'ali@example.com',
---    'PBKDF2:210000:U2FsdGVkX1+demoSaltDemoSaltB==:ZGVtb0hhc2hWYWx1ZURlbW9IYXNoVmFsdWVEZW1vSGFzaA==', 'student');
+--    'PBKDF2:210000:EBESExQVFhcYGRobHB0eHw==:xmlfVVbH3zxLNMnd3Dt3fKgCt7tUab4jgMkPZlzVvuE=', 'student');
+--
+-- INSERT INTO classes (teacher_id, class_name, class_code)
+--   SELECT id, 'Physics 101', 'PHY101' FROM users WHERE username = 'prof_smith';
+--
+-- INSERT INTO enrollments (class_id, student_id)
+--   SELECT c.id, u.id FROM classes c, users u
+--   WHERE c.class_code = 'PHY101' AND u.username = 'ali_student';

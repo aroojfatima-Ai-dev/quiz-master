@@ -208,6 +208,14 @@ class InputValidatorTest {
         assertNotNull(InputValidator.validateQuestion("What is 2+2?", tooLong, "4", "5", "6"));
         assertNull(InputValidator.validateQuestion("What is 2+2?",
                 "o".repeat(InputValidator.OPTION_MAX_LENGTH), "4", "5", "6"));
+
+        // questions.question_text is a TEXT column, but a paste or an imported file that
+        // exceeds this is a mistake worth reporting instead of letting MySQL answer with
+        // "Data too long for column 'question_text'".
+        assertNotNull(InputValidator.validateQuestion(
+                "q".repeat(InputValidator.QUESTION_TEXT_MAX_LENGTH + 1), "3", "4", "5", "6"));
+        assertNull(InputValidator.validateQuestion(
+                "q".repeat(InputValidator.QUESTION_TEXT_MAX_LENGTH), "3", "4", "5", "6"));
     }
 
     @Test

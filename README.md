@@ -59,8 +59,20 @@ How the parser behaves:
   required, because text extracted from a PDF or Word file does not reliably keep them.
 - **Wrapped lines are joined.** Extraction breaks long lines wherever the page ends, so
   any line that is not a keyword continues the field above it.
-- **`Topic` and `Difficulty` are optional** and default to `General` and `MEDIUM`. An
-  unrecognised difficulty also falls back to `MEDIUM`.
+- **A sample file is included**: [`samples/sample-questions.txt`](samples/sample-questions.txt)
+  is a five-question file that the test suite parses on every build.
+- **`Topic` and `Difficulty` are optional** and default to `General` and `MEDIUM`.
+  Recognised difficulty spellings are `EASY`/`MEDIUM`/`HARD` plus the obvious synonyms
+  (`Easy`, `Difficult`, `Med`, `Hard (level 3)`); anything else falls back to `MEDIUM`
+  rather than costing you the question.
+- **A whole question on one line is understood**, so a `.txt` written as
+  `Q: Capital of France? A) Berlin B) Paris C) Madrid D) Rome Answer: B` works. The line is
+  only split when it holds all four option markers `A) B) C) D)` in order.
+- **An answer may be written out instead of as a letter** (`Answer: Paris`). It is matched
+  against the option texts, and if two options fit, nothing is guessed - the block is
+  reported instead.
+- **Extraction artefacts are removed**: page breaks between PDF pages, non-breaking spaces,
+  the byte order mark a Windows editor adds, and the Unicode line/paragraph separators.
 - A block is **skipped and listed with its line number and reason** when it has no
   question text, is missing one of the four options, has an option longer than the
   `VARCHAR(500)` column, or has a missing or unreadable `Answer:`.
@@ -172,14 +184,26 @@ class so it could be tested without opening a window:
   order, wrapped lines from PDF/DOCX extraction, keyword and option spellings, the
   `General`/`MEDIUM` defaults, every skip reason, CRLF/BOM/non-breaking-space handling,
   the 200-question cap, and that no input at all can make the parser throw.
+- **`QuestionFileToleranceTest`** — the cases real files throw at it: a whole question on
+  one line, several questions on one line, an answer written as text (and the ambiguous
+  case that must *not* be guessed), difficulty synonyms, page breaks and non-breaking
+  spaces, and that an ordinary one-field-per-line file is left alone.
+- **`SampleFileTest`** — reads `samples/sample-questions.txt` through the reader and the
+  parser together, so the sample teachers copy always parses.
+- **`SchemaSeedTest`** — reads `schema.sql` and verifies that the documented demo hashes
+  really are `teacher123` / `student123`, that every table and index is declared, and that
+  the runtime bootstrap in `DBConnection` declares the same indexes.
 
-`QuestionFileReader`, which does the PDF/DOCX/TXT extraction, is not unit tested because
-it only wraps PDFBox and POI. It is verified end to end instead: real `.txt`, `.pdf` and
-`.docx` files (including a corrupt PDF, a corrupt DOCX, an oversized file and an old
-`.doc`) are run through `QuestionFileReader.readText` and then
-`QuestionFileParser.parse` — the same pair of calls the upload screen makes. Every error
-path is asserted to raise an `IOException` carrying a message meant for the teacher,
-never an unchecked exception.
+`QuestionFileReader`, which does the PDF/DOCX/TXT extraction, is verified end to end
+rather than unit tested, because it only wraps PDFBox and POI: during development, real
+`.txt`, `.pdf` and `.docx` files (including a PDF written by PDFBox itself, a scanned PDF
+with no text layer, a corrupt DOCX, an oversized file, a legacy `.doc` and a `.doc`
+renamed to `.docx`) were run through `QuestionFileReader.readText` and then
+`QuestionFileParser.parse` — the same pair of calls the upload screen makes — and then
+saved to a real MySQL/MariaDB server through `TestDAO` and read back to confirm the
+questions arrive in file order with the right topics and difficulties. Every error path
+raises an `IOException` carrying a message meant for the teacher, never an unchecked
+exception.
 
 ---
 
@@ -188,7 +212,9 @@ never an unchecked exception.
 ```
 .
 ├── pom.xml                     Maven build (JavaFX 25, MySQL Connector/J, PDFBox, POI, JUnit 5)
-├── schema.sql                  Full database schema for manual import
+├── schema.sql                  Full database schema for manual import (+ optional demo data)
+├── samples
+│   └── sample-questions.txt    Example file for the question import
 └── src
     ├── main/java/com/quiz
     │   ├── App.java            All JavaFX screens and navigation
@@ -202,9 +228,9 @@ never an unchecked exception.
     │   ├── security            PasswordUtil (PBKDF2 hashing)
     │   └── validation          InputValidator (all field rules)
     └── test/java/com/quiz
-        ├── importing/QuestionFileParserTest.java
-        ├── security/PasswordUtilTest.java
-        └── validation/InputValidatorTest.java
+        ├── importing        QuestionFileParserTest, QuestionFileToleranceTest, SampleFileTest
+        ├── security         PasswordUtilTest, SchemaSeedTest
+        └── validation       InputValidatorTest
 ```
 
 The `importing` package holds no database or JavaFX code, which is what lets the whole
@@ -240,3 +266,26 @@ for bugs:
   actual count.
 - `App.java` builds every screen in code and is over 2,700 lines long. Splitting each
   screen into its own class would be the natural next refactor.
+
+---
+
+## What this revision fixed
+
+Bugs found while adding the import feature. Each one is a defect that could be reproduced
+before the change.
+
+| # | Problem | Fix |
+| --- | --- | --- |
+| 1 | The manual wizard never called `InputValidator.validateTopic`, so a topic longer than the `questions.topic` column (`VARCHAR(100)`) reached MySQL and failed the whole save with "Data too long for column 'topic'". | The wizard validates the topic on **Next** and on **Finish**, with the length named in the message. (The import screens already did this.) |
+| 2 | `validateQuestion` bounded the four options but not the question text, so a huge paste produced a raw SQL error instead of a message. | `QUESTION_TEXT_MAX_LENGTH` (2 000) is enforced for typed and imported questions alike. |
+| 3 | A question block whose `Topic:` line was blank was stored as an empty topic, because the wizard copied the draft straight into a `NOT NULL` column with a `'General'` default. | A blank topic or difficulty is normalised to `General` / `MEDIUM` on the way in. |
+| 4 | An answer written as a sentence containing the word "a" (`Answer: Pacific Ocean - it covers ...`) was read as option **A**, because any single-letter token `A`–`D` anywhere in the answer was accepted. | Only a whole-value letter (`" b "`, `"(c)"`), a leading marker (`"B)"`, `"A - the first one"`) or an explicit phrase (`"answer is B"`, `"option D"`) counts. Anything else is matched against the option texts, and reported if ambiguous. |
+| 5 | A question written on one line (`Q: ... A) ... D) ... Answer: B`) was reported as a failed block, although a `.txt` file written that way is a natural mistake. | A line holding all four option markers in order is expanded into its fields first. Ordinary files are untouched. |
+| 6 | A form feed (where a PDF page ends) was left in the text, gluing the last line of one page to the first line of the next - the following question was swallowed as continuation text. | Page breaks, vertical tabs, non-breaking/figure/narrow spaces, zero-width spaces and the byte order mark are normalised away. |
+| 7 | Difficulty spellings like `Difficult`, `Med` or `Easy` silently became `MEDIUM`, quietly losing a HARD rating. | Synonyms map to the nearest level; only a genuinely unrecognised value uses the documented `MEDIUM` fallback. |
+| 8 | The schema created at runtime did not match `schema.sql`: the five `idx_...` indexes existed only in the file, so a database bootstrapped by the app had none of them while the README promised the two schemas were identical. | The bootstrap creates the indexes for a new database and adds them to an existing one (a duplicate-index error is ignored). `SchemaSeedTest` fails the build if the two ever drift apart again. |
+| 9 | A wrong database password was reported as "Could not create database ... or grant the CREATE privilege", sending the user to look at privileges instead of credentials. | An access-denied error (MySQL 1044/1045) is now reported as a credentials problem, naming the properties and environment variables to set. |
+| 10 | The test countdown (an `INDEFINITE` JavaFX animation kept outside the screen's animation list) was never stopped: it kept ticking once a second for the rest of the session and kept the stage alive after the window closed. Starting a second test could leave two countdowns running. | The countdown is tracked in a field, stopped on application exit, and replaced when a new test starts. |
+| 11 | A double click on "Finish & Save Test" could create the same test twice. | Both save handlers ignore a second click; a failed save still leaves the button usable. |
+| 12 | The demo accounts documented in `schema.sql` used placeholder hashes, so uncommenting the block produced accounts that could never log in - while the comment claimed they were real hashes of `teacher123` / `student123`. | Real hashes are in place (verified against a server), the class and enrolment seeding statements are included, and `SchemaSeedTest` fails the build if either hash stops matching its password. |
+| 13 | A few `String.format` calls on the student screens (countdown, "You scored x out of y", the results history, the answer review) used the default locale, which renders non-Latin digits in an otherwise English UI. | All user-visible formatting uses `Locale.ROOT`. |

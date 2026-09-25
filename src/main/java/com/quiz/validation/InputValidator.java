@@ -47,6 +47,16 @@ public final class InputValidator {
     public static final int TOPIC_MAX_LENGTH = 100;
 
     /**
+     * Upper bound for the text of one question.
+     *
+     * <p>The column is a {@code TEXT} (about 64 KB), which is far more than any real
+     * multiple-choice question needs; a paste or an imported file that exceeds this is a
+     * mistake, and catching it here produces a readable message instead of MySQL's
+     * "Data too long for column 'question_text'".
+     */
+    public static final int QUESTION_TEXT_MAX_LENGTH = 2000;
+
+    /**
      * Upper bound for a test duration, in minutes (1,440 = 24 hours).
      *
      * <p>The UI stores durations as {@code minutes * 60} seconds in an {@code int}, so
@@ -207,6 +217,9 @@ public final class InputValidator {
         if (isBlank(questionText) || isBlank(optionA) || isBlank(optionB)
                 || isBlank(optionC) || isBlank(optionD)) {
             return "Please enter question text and all 4 options before proceeding.";
+        }
+        if (questionText.trim().length() > QUESTION_TEXT_MAX_LENGTH) {
+            return "Question text must be at most " + QUESTION_TEXT_MAX_LENGTH + " characters.";
         }
         if (anyTooLong(optionA, optionB, optionC, optionD)) {
             return "Each option must be at most " + OPTION_MAX_LENGTH + " characters.";
