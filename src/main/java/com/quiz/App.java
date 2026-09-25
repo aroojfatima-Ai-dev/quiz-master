@@ -4,6 +4,11 @@ import com.quiz.dao.ClassDAO;
 import com.quiz.dao.ResultDAO;
 import com.quiz.dao.TestDAO;
 import com.quiz.dao.UserDAO;
+import com.quiz.importing.ImportResult;
+import com.quiz.importing.ParseFailure;
+import com.quiz.importing.ParsedQuestion;
+import com.quiz.importing.QuestionFileParser;
+import com.quiz.importing.QuestionFileReader;
 import com.quiz.model.Question;
 import com.quiz.model.User;
 import com.quiz.validation.InputValidator;
@@ -13,6 +18,7 @@ import javafx.animation.FadeTransition;
 import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
 import javafx.application.Application;
+import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.NodeOrientation;
 import javafx.geometry.Pos;
@@ -25,9 +31,12 @@ import javafx.scene.paint.Color;
 import javafx.scene.shape.Circle;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
+import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
+import java.io.File;
+import java.io.IOException;
 import java.sql.SQLException;
 import java.util.*;
 
@@ -99,9 +108,47 @@ public class App extends Application {
 
     @Override
     public void start(Stage stage) {
+        installGlobalExceptionHandler();
+
         stage.setTitle("QuizMaster Application");
         showWelcomeScreen(stage);
         stage.show();
+    }
+
+    /**
+     * Last line of defence so an unforeseen problem shows a message instead of
+     * silently killing a screen or the window.
+     *
+     * <p>Everything that is expected to fail - a corrupt PDF, an unreadable file, a
+     * rejected question - is already handled where it happens and reported in the
+     * screen that caused it. This only catches what nobody anticipated.
+     */
+    private void installGlobalExceptionHandler() {
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            System.err.println("Unhandled exception on thread '" + thread.getName() + "':");
+            throwable.printStackTrace();
+
+            // Reporting must not itself throw, and must not run before the toolkit is
+            // up, so it is done defensively on the FX thread.
+            try {
+                Platform.runLater(() -> {
+                    try {
+                        Alert alert = new Alert(Alert.AlertType.ERROR);
+                        alert.setTitle("QuizMaster - Unexpected Error");
+                        alert.setHeaderText("Something went wrong, but QuizMaster is still running.");
+                        String detail = throwable.getMessage();
+                        alert.setContentText(detail == null || detail.isBlank()
+                                ? throwable.getClass().getSimpleName()
+                                : detail);
+                        alert.showAndWait();
+                    } catch (RuntimeException ignored) {
+                        // The alert is a courtesy; the stack trace above is the record.
+                    }
+                });
+            } catch (RuntimeException ignored) {
+                // Toolkit not available - the stack trace above is enough.
+            }
+        });
     }
 
     /**
@@ -1179,6 +1226,7 @@ public class App extends Application {
         HBox navBox = new HBox(10, backBtn, nextBtn, finishBtn);
         navBox.setAlignment(Pos.CENTER);
 
+
         Runnable saveCurrentQuestionToMemory = () -> {
             currentQuestion.questionText = questionTextField.getText().trim();
             currentQuestion.optionA = optAField.getText().trim();
@@ -1201,6 +1249,51 @@ public class App extends Application {
                 draftQuestions.add(currentQuestion);
             }
         };
+
+        // ------------------------------------------------------------------
+        // Alternative to typing questions one by one: import them from a file.
+        // Deliberately placed after the manual controls so the manual flow is
+        // unchanged; this is purely an additional route to the same draft list.
+        // ------------------------------------------------------------------
+        Label uploadHeading = new Label("Or import questions from a file");
+        uploadHeading.setFont(Font.font("Segoe UI", FontWeight.BOLD, 14));
+        uploadHeading.setTextFill(Color.web("#0f172a"));
+
+        Label uploadHint = new Label("Upload a PDF, Word (.docx) or text (.txt) file that follows "
+                + "the required format. You will see a preview before anything is saved.");
+        uploadHint.setFont(Font.font("Segoe UI", FontWeight.NORMAL, 12));
+        uploadHint.setTextFill(Color.web("#475569"));
+        uploadHint.setWrapText(true);
+
+        Label uploadFormatPeek = new Label("Q: <question text>   |   A) ...  B) ...  C) ...  D) ...   |   "
+                + "Answer: A   |   Topic: ...   |   Difficulty: EASY");
+        uploadFormatPeek.setFont(Font.font("Consolas", FontWeight.NORMAL, 11));
+        uploadFormatPeek.setTextFill(Color.web("#0f172a"));
+        uploadFormatPeek.setWrapText(true);
+        uploadFormatPeek.setPadding(new Insets(8, 10, 8, 10));
+        uploadFormatPeek.setMaxWidth(Double.MAX_VALUE);
+        uploadFormatPeek.setStyle("-fx-background-color: #f1f5f9; -fx-border-color: #cbd5e1; "
+                + "-fx-border-radius: 6; -fx-background-radius: 6;");
+
+        Button uploadBtn = new Button("📄  Upload Questions File");
+        uploadBtn.setMaxWidth(Double.MAX_VALUE);
+        uploadBtn.setPrefHeight(44);
+        uploadBtn.setStyle("-fx-background-color: #7c3aed; -fx-text-fill: white; -fx-font-weight: bold; "
+                + "-fx-font-size: 15px; -fx-background-radius: 6; -fx-cursor: hand;");
+
+        uploadBtn.setOnAction(e -> {
+            // Keep whatever is currently on screen, exactly as the Back button does,
+            // so navigating away to the upload screen cannot lose typed work.
+            if (!questionTextField.getText().trim().isEmpty()) {
+                saveCurrentQuestionToMemory.run();
+            }
+            showImportUploadScreen(stage, user, draftTest, draftQuestions);
+        });
+
+        VBox uploadBox = new VBox(8, uploadHeading, uploadHint, uploadFormatPeek, uploadBtn);
+        uploadBox.setPadding(new Insets(14));
+        uploadBox.setStyle("-fx-background-color: #faf5ff; -fx-border-color: #d8b4fe; "
+                + "-fx-border-radius: 10; -fx-background-radius: 10;");
 
         backBtn.setOnAction(e -> {
             if (!questionTextField.getText().trim().isEmpty()) {
@@ -1279,10 +1372,604 @@ public class App extends Application {
                 topicField,
                 new Label("Difficulty:"), difficultyCombo,
                 messageLabel,
-                navBox
+                navBox,
+                uploadBox
         );
 
         installScrollableScreen(stage, form, 750, 700);
+    }
+
+    // =========================================================================
+    // IMPORT QUESTIONS FROM A FILE
+    //
+    // An additional route to the same draft list the wizard builds by hand. The
+    // parse is done by com.quiz.importing (PDFBox / POI / plain text) and nothing
+    // reaches the database until "Confirm & Save All" is pressed, which writes the
+    // test and every question on one connection in one transaction.
+    // =========================================================================
+
+    /**
+     * UPLOAD SCREEN: shows the required file format, then lets the teacher pick a
+     * file. Parsing happens here, and any problem with the file is reported on this
+     * screen without leaving it.
+     */
+    private void showImportUploadScreen(Stage stage, User user,
+                                        DraftTestDetails draftTest,
+                                        List<DraftQuestion> draftQuestions) {
+        VBox card = new VBox(16);
+        card.setMaxWidth(620);
+        card.setAlignment(Pos.CENTER);
+        card.setPadding(new Insets(26));
+        card.setStyle("-fx-background-color: #ffffff; -fx-border-color: #cbd5e1; "
+                + "-fx-border-radius: 12; -fx-background-radius: 12; "
+                + "-fx-effect: dropshadow(three-pass-box, rgba(0,0,0,0.08), 16, 0, 0, 4);");
+
+        Label header = new Label("Upload Questions File");
+        header.setFont(Font.font("Segoe UI", FontWeight.BOLD, 22));
+        header.setTextFill(Color.web("#7c3aed"));
+
+        Label sub = new Label("Test: " + draftTest.title + " (" + draftTest.language + ")");
+        sub.setFont(Font.font("Segoe UI", FontWeight.NORMAL, 13));
+        sub.setTextFill(Color.web("#64748b"));
+
+        VBox headerBox = new VBox(4, header, sub);
+        headerBox.setAlignment(Pos.CENTER);
+
+        // ---- The format, exactly as teachers must write it ----
+        Label formatTitle = new Label("Required file format");
+        formatTitle.setFont(Font.font("Segoe UI", FontWeight.BOLD, 14));
+        formatTitle.setTextFill(Color.web("#0f172a"));
+
+        Label formatExample = new Label(QuestionFileParser.DOCUMENTED_FORMAT);
+        formatExample.setFont(Font.font("Consolas", FontWeight.NORMAL, 12));
+        formatExample.setTextFill(Color.web("#0f172a"));
+        formatExample.setPadding(new Insets(12, 14, 12, 14));
+        formatExample.setMaxWidth(Double.MAX_VALUE);
+        formatExample.setStyle("-fx-background-color: #f8fafc; -fx-border-color: #cbd5e1; "
+                + "-fx-border-radius: 6; -fx-background-radius: 6;");
+
+        Label notesTitle = new Label("Rules");
+        notesTitle.setFont(Font.font("Segoe UI", FontWeight.BOLD, 14));
+        notesTitle.setTextFill(Color.web("#0f172a"));
+
+        Label notes = new Label(
+                "• Put a blank line between questions (not required, but easier to read).\n"
+              + "• Supported files: .pdf, .docx and .txt.\n"
+              + "• Topic and Difficulty are optional — they default to General and MEDIUM.\n"
+              + "• Questions are imported in the order they appear in the file.\n"
+              + "• Any question that does not match the format is skipped and listed with the reason.\n"
+              + "• Nothing is saved until you press \"Confirm & Save All\" on the preview screen.");
+        notes.setFont(Font.font("Segoe UI", FontWeight.NORMAL, 12));
+        notes.setTextFill(Color.web("#475569"));
+        notes.setWrapText(true);
+        notes.setMaxWidth(Double.MAX_VALUE);
+
+        Label messageLabel = new Label();
+        messageLabel.setWrapText(true);
+        messageLabel.setMaxWidth(Double.MAX_VALUE);
+
+        Button chooseBtn = new Button("📂  Choose File…");
+        chooseBtn.setMaxWidth(Double.MAX_VALUE);
+        chooseBtn.setPrefHeight(46);
+        chooseBtn.setStyle("-fx-background-color: #7c3aed; -fx-text-fill: white; -fx-font-weight: bold; "
+                + "-fx-font-size: 15px; -fx-background-radius: 6; -fx-cursor: hand;");
+
+        Button backBtn = new Button("← Back to Questions");
+        backBtn.setMaxWidth(Double.MAX_VALUE);
+        backBtn.setPrefHeight(44);
+        backBtn.setStyle("-fx-background-color: #64748b; -fx-text-fill: white; -fx-font-weight: bold; "
+                + "-fx-font-size: 14px; -fx-background-radius: 6; -fx-cursor: hand;");
+        backBtn.setOnAction(e -> showWizardStep2QuestionScreen(stage, user, draftTest,
+                draftQuestions, draftQuestions.size()));
+
+        chooseBtn.setOnAction(e -> {
+            File chosen;
+            try {
+                FileChooser chooser = new FileChooser();
+                chooser.setTitle("Select Questions File");
+                chooser.getExtensionFilters().addAll(
+                        new FileChooser.ExtensionFilter("Questions files (*.pdf, *.docx, *.txt)",
+                                "*.pdf", "*.docx", "*.txt"),
+                        new FileChooser.ExtensionFilter("PDF documents (*.pdf)", "*.pdf"),
+                        new FileChooser.ExtensionFilter("Word documents (*.docx)", "*.docx"),
+                        new FileChooser.ExtensionFilter("Text files (*.txt)", "*.txt"),
+                        new FileChooser.ExtensionFilter("All files", "*.*"));
+                chosen = chooser.showOpenDialog(stage);
+            } catch (RuntimeException ex) {
+                // A native file dialog can fail on a machine with no usable desktop;
+                // that must not take the application down.
+                showMessage(messageLabel, "The file chooser could not be opened: " + ex.getMessage(), false);
+                return;
+            }
+
+            if (chosen == null) {
+                return; // The teacher cancelled - not an error.
+            }
+
+            try {
+                String text = QuestionFileReader.readText(chosen);
+                ImportResult result = QuestionFileParser.parse(text);
+
+                if (result.getQuestions().isEmpty()) {
+                    showMessage(messageLabel, result.getFailures().isEmpty()
+                            ? "No questions were found in '" + chosen.getName() + "'."
+                            : "No questions could be read from '" + chosen.getName()
+                              + "'. See the reasons below the format example.", false);
+                    showImportFailureSummary(card, messageLabel, result.getFailures());
+                    return;
+                }
+
+                showImportPreviewScreen(stage, user, draftTest, draftQuestions,
+                        chosen.getName(), result);
+                return;
+
+            } catch (IOException ex) {
+                // QuestionFileReader's messages are written to be shown verbatim.
+                showMessage(messageLabel, ex.getMessage(), false);
+            } catch (RuntimeException ex) {
+                // Belt and braces: the promise is that no file can crash the app.
+                showMessage(messageLabel, "The file '" + chosen.getName()
+                        + "' could not be processed: " + ex.getMessage(), false);
+            }
+        });
+
+        VBox formatBox = new VBox(8, formatTitle, formatExample, notesTitle, notes);
+        formatBox.setPadding(new Insets(14));
+        formatBox.setStyle("-fx-background-color: #faf5ff; -fx-border-color: #d8b4fe; "
+                + "-fx-border-radius: 10; -fx-background-radius: 10;");
+
+        card.getChildren().addAll(headerBox, formatBox, messageLabel, chooseBtn, backBtn);
+
+        installScrollableScreen(stage, card, 750, 700);
+    }
+
+    /**
+     * Appends a short list of skipped-question reasons to the upload card, so a file
+     * that yielded nothing still tells the teacher why. Any list added by an earlier
+     * attempt is replaced rather than stacked.
+     */
+    private void showImportFailureSummary(VBox card, Label messageLabel, List<ParseFailure> failures) {
+        card.getChildren().removeIf(node -> "importFailures".equals(node.getId()));
+        if (failures.isEmpty()) {
+            return;
+        }
+
+        VBox list = new VBox(6);
+        list.setId("importFailures");
+        list.setPadding(new Insets(12));
+        list.setStyle("-fx-background-color: #fef2f2; -fx-border-color: #fecaca; "
+                + "-fx-border-radius: 8; -fx-background-radius: 8;");
+
+        for (ParseFailure failure : failures) {
+            Label item = new Label(failureLabel(failure));
+            item.setFont(Font.font("Segoe UI", FontWeight.NORMAL, 12));
+            item.setTextFill(Color.web("#b91c1c"));
+            item.setWrapText(true);
+            item.setMaxWidth(Double.MAX_VALUE);
+            list.getChildren().add(item);
+        }
+
+        int index = card.getChildren().indexOf(messageLabel);
+        card.getChildren().add(index < 0 ? card.getChildren().size() : index + 1, list);
+    }
+
+    /** Renders one skipped entry as "Line 12: reason — "snippet"". */
+    private static String failureLabel(ParseFailure failure) {
+        StringBuilder text = new StringBuilder();
+        text.append(failure.getLineNumber() > 0 ? "Line " + failure.getLineNumber() + ": " : "File: ")
+            .append(failure.getReason());
+        if (!failure.getSnippet().isEmpty()) {
+            text.append("  —  ").append(failure.getSnippet());
+        }
+        return text.toString();
+    }
+
+    /**
+     * PREVIEW SCREEN: every parsed question in file order, plus the ones that were
+     * skipped. Nothing is saved yet; each row can be edited or removed, and
+     * "Confirm & Save All" writes the whole test in a single transaction.
+     */
+    private void showImportPreviewScreen(Stage stage, User user,
+                                         DraftTestDetails draftTest,
+                                         List<DraftQuestion> draftQuestions,
+                                         String fileName,
+                                         ImportResult result) {
+
+        // Working copy: the preview owns these until the teacher confirms, so
+        // cancelling leaves the manual draft exactly as it was.
+        List<DraftQuestion> imported = new ArrayList<>();
+        for (ParsedQuestion q : result.getQuestions()) {
+            imported.add(toDraftQuestion(q));
+        }
+
+        final int[] removedCount = { 0 };
+        List<ParseFailure> failures = result.getFailures();
+
+        VBox card = new VBox(14);
+        card.setMaxWidth(680);
+        card.setAlignment(Pos.CENTER);
+        card.setPadding(new Insets(24));
+        card.setStyle("-fx-background-color: #ffffff; -fx-border-color: #cbd5e1; "
+                + "-fx-border-radius: 12; -fx-background-radius: 12; "
+                + "-fx-effect: dropshadow(three-pass-box, rgba(0,0,0,0.08), 16, 0, 0, 4);");
+
+        Label header = new Label("Review Imported Questions");
+        header.setFont(Font.font("Segoe UI", FontWeight.BOLD, 22));
+        header.setTextFill(Color.web("#7c3aed"));
+
+        Label fileLabel = new Label("From: " + fileName + "  |  " + imported.size()
+                + (imported.size() == 1 ? " question found" : " questions found")
+                + "  |  nothing saved yet");
+        fileLabel.setFont(Font.font("Segoe UI", FontWeight.NORMAL, 13));
+        fileLabel.setTextFill(Color.web("#64748b"));
+        fileLabel.setWrapText(true);
+
+        VBox headerBox = new VBox(4, header, fileLabel);
+        headerBox.setAlignment(Pos.CENTER);
+
+        Label messageLabel = new Label();
+        messageLabel.setWrapText(true);
+        messageLabel.setMaxWidth(Double.MAX_VALUE);
+
+        // ---- Skipped questions ----
+        VBox failuresBox = new VBox(6);
+        failuresBox.setPadding(new Insets(12));
+        if (failures.isEmpty()) {
+            failuresBox.setManaged(false);
+            failuresBox.setVisible(false);
+        } else {
+            failuresBox.setStyle("-fx-background-color: #fef2f2; -fx-border-color: #fecaca; "
+                    + "-fx-border-radius: 8; -fx-background-radius: 8;");
+            Label failuresTitle = new Label("⚠  " + failures.size()
+                    + (failures.size() == 1 ? " question was skipped" : " questions were skipped")
+                    + " (not imported)");
+            failuresTitle.setFont(Font.font("Segoe UI", FontWeight.BOLD, 13));
+            failuresTitle.setTextFill(Color.web("#b91c1c"));
+            failuresBox.getChildren().add(failuresTitle);
+            for (ParseFailure failure : failures) {
+                Label item = new Label(failureLabel(failure));
+                item.setFont(Font.font("Segoe UI", FontWeight.NORMAL, 12));
+                item.setTextFill(Color.web("#b91c1c"));
+                item.setWrapText(true);
+                item.setMaxWidth(Double.MAX_VALUE);
+                failuresBox.getChildren().add(item);
+            }
+        }
+
+        // ---- The editable list of imported questions ----
+        VBox listBox = new VBox(10);
+        listBox.setAlignment(Pos.TOP_LEFT);
+
+        final Runnable[] refresh = new Runnable[1];
+        refresh[0] = () -> {
+            listBox.getChildren().clear();
+
+            if (imported.isEmpty()) {
+                Label none = new Label(removedCount[0] == 0
+                        ? "No questions were imported."
+                        : "All imported questions were removed. Use Back to try another file.");
+                none.setTextFill(Color.web("#94a3b8"));
+                none.setWrapText(true);
+                listBox.getChildren().add(none);
+                return;
+            }
+
+            for (int i = 0; i < imported.size(); i++) {
+                DraftQuestion q = imported.get(i);
+                final int index = i;
+
+                VBox row = new VBox(6);
+                row.setPadding(new Insets(12, 14, 12, 14));
+                row.setStyle("-fx-background-color: #f8fafc; -fx-border-color: #e2e8f0; "
+                        + "-fx-border-radius: 8; -fx-background-radius: 8;");
+
+                Label number = new Label("Q" + (index + 1) + "  ·  " + q.topic + "  ·  " + q.difficulty);
+                number.setFont(Font.font("Segoe UI", FontWeight.BOLD, 12));
+                number.setTextFill(Color.web("#7c3aed"));
+
+                Label question = new Label(q.questionText);
+                question.setFont(Font.font("Segoe UI", FontWeight.SEMI_BOLD, 14));
+                question.setTextFill(Color.web("#1e293b"));
+                question.setWrapText(true);
+                question.setMaxWidth(Double.MAX_VALUE);
+
+                Label options = new Label("A) " + q.optionA + "\nB) " + q.optionB
+                        + "\nC) " + q.optionC + "\nD) " + q.optionD);
+                options.setFont(Font.font("Segoe UI", FontWeight.NORMAL, 12));
+                options.setTextFill(Color.web("#475569"));
+                options.setWrapText(true);
+                options.setMaxWidth(Double.MAX_VALUE);
+
+                Label answer = new Label("Correct answer: " + q.correctOption);
+                answer.setFont(Font.font("Segoe UI", FontWeight.BOLD, 12));
+                answer.setTextFill(Color.web("#16a34a"));
+
+                Button editBtn = new Button("✏  Edit");
+                editBtn.setPrefHeight(32);
+                editBtn.setStyle("-fx-background-color: #0284c7; -fx-text-fill: white; -fx-font-weight: bold; "
+                        + "-fx-font-size: 12px; -fx-background-radius: 5; -fx-cursor: hand;");
+
+                Button removeBtn = new Button("🗑  Remove");
+                removeBtn.setPrefHeight(32);
+                removeBtn.setStyle("-fx-background-color: #dc2626; -fx-text-fill: white; -fx-font-weight: bold; "
+                        + "-fx-font-size: 12px; -fx-background-radius: 5; -fx-cursor: hand;");
+
+                editBtn.setOnAction(e -> showImportEditQuestionScreen(stage, user, draftTest,
+                        draftQuestions, fileName, result, imported, refresh[0], index));
+
+                removeBtn.setOnAction(e -> {
+                    if (index < imported.size()) {
+                        imported.remove(index);
+                        removedCount[0]++;
+                    }
+                    showMessage(messageLabel, "Question removed from this import.", true);
+                    refresh[0].run();
+                });
+
+                HBox actions = new HBox(8, editBtn, removeBtn);
+                actions.setAlignment(Pos.CENTER_RIGHT);
+
+                row.getChildren().addAll(number, question, options, answer, actions);
+                listBox.getChildren().add(row);
+            }
+        };
+        refresh[0].run();
+
+        // ---- Save ----
+        Button confirmBtn = new Button("✓  Confirm & Save All");
+        confirmBtn.setMaxWidth(Double.MAX_VALUE);
+        confirmBtn.setPrefHeight(46);
+        confirmBtn.setStyle("-fx-background-color: #10b981; -fx-text-fill: white; -fx-font-weight: bold; "
+                + "-fx-font-size: 15px; -fx-background-radius: 6; -fx-cursor: hand;");
+
+        Button cancelBtn = new Button("← Back to Questions");
+        cancelBtn.setMaxWidth(Double.MAX_VALUE);
+        cancelBtn.setPrefHeight(44);
+        cancelBtn.setStyle("-fx-background-color: #64748b; -fx-text-fill: white; -fx-font-weight: bold; "
+                + "-fx-font-size: 14px; -fx-background-radius: 6; -fx-cursor: hand;");
+        cancelBtn.setOnAction(e -> showWizardStep2QuestionScreen(stage, user, draftTest,
+                draftQuestions, draftQuestions.size()));
+
+        confirmBtn.setOnAction(e -> {
+            if (imported.isEmpty()) {
+                showMessage(messageLabel, "There is nothing to save - every imported question was removed.", false);
+                return;
+            }
+
+            // Re-check every question, because editing can leave one incomplete.
+            List<String> problems = new ArrayList<>();
+            for (int i = 0; i < imported.size(); i++) {
+                DraftQuestion q = imported.get(i);
+                String error = InputValidator.validateQuestion(q.questionText, q.optionA,
+                        q.optionB, q.optionC, q.optionD);
+                if (error == null) {
+                    error = InputValidator.validateTopic(q.topic);
+                }
+                if (error != null) {
+                    problems.add("Q" + (i + 1) + ": " + error);
+                }
+            }
+            if (!problems.isEmpty()) {
+                showMessage(messageLabel, "Please fix these before saving — " + String.join("  |  ", problems), false);
+                return;
+            }
+
+            // Manual questions first (they were created first), then the imported ones
+            // in file order.
+            List<DraftQuestion> combined = new ArrayList<>(draftQuestions);
+            combined.addAll(imported);
+
+            // Every question and the test itself are written on one connection in one
+            // transaction. Using TestDAO.addQuestion() in a loop would instead commit
+            // each question separately and could leave a half-saved test behind if one
+            // failed - the exact problem createTestWithQuestions was added to fix.
+            List<Question> questions = new ArrayList<>(combined.size());
+            for (DraftQuestion q : combined) {
+                questions.add(new Question(q.questionText, q.optionA, q.optionB, q.optionC,
+                        q.optionD, q.correctOption,
+                        q.topic == null || q.topic.isBlank() ? "General" : q.topic,
+                        q.difficulty == null || q.difficulty.isBlank() ? "MEDIUM" : q.difficulty));
+            }
+
+            try {
+                testDAO.createTestWithQuestions(
+                        draftTest.title, draftTest.language, draftTest.timeMinutes * 60,
+                        draftTest.expiryAction, user.getId(),
+                        draftTest.classId, draftTest.isPublic, questions);
+
+                String successMsg = String.format(Locale.ROOT,
+                        "Test '%s' created successfully with %d questions imported from %s!",
+                        draftTest.title, questions.size(), fileName);
+                showTeacherDashboard(stage, user, successMsg);
+
+            } catch (SQLException ex) {
+                showMessage(messageLabel, "Failed to save the imported questions: " + ex.getMessage(), false);
+            } catch (RuntimeException ex) {
+                showMessage(messageLabel, "Unexpected problem while saving: " + ex.getMessage(), false);
+            }
+        });
+
+        card.getChildren().addAll(headerBox, failuresBox, messageLabel, listBox, confirmBtn, cancelBtn);
+
+        installScrollableScreen(stage, card, 800, 720);
+    }
+
+    /**
+     * EDIT SCREEN: edit one imported question. Matches the wizard's one-item-per-page
+     * pattern; saving returns to the preview with the change applied in place.
+     */
+    private void showImportEditQuestionScreen(Stage stage, User user,
+                                              DraftTestDetails draftTest,
+                                              List<DraftQuestion> draftQuestions,
+                                              String fileName,
+                                              ImportResult result,
+                                              List<DraftQuestion> imported,
+                                              Runnable onSaved,
+                                              int index) {
+
+        DraftQuestion q = imported.get(index);
+
+        VBox form = new VBox(14);
+        form.setMaxWidth(580);
+        form.setAlignment(Pos.CENTER);
+        form.setPadding(new Insets(26));
+        form.setStyle("-fx-background-color: #ffffff; -fx-border-color: #cbd5e1; "
+                + "-fx-border-radius: 12; -fx-background-radius: 12; "
+                + "-fx-effect: dropshadow(three-pass-box, rgba(0,0,0,0.08), 16, 0, 0, 4);");
+
+        Label header = new Label("Edit Imported Question " + (index + 1));
+        header.setFont(Font.font("Segoe UI", FontWeight.BOLD, 21));
+        header.setTextFill(Color.web("#7c3aed"));
+
+        Label sub = new Label("From: " + fileName);
+        sub.setFont(Font.font("Segoe UI", FontWeight.NORMAL, 13));
+        sub.setTextFill(Color.web("#64748b"));
+
+        VBox headerBox = new VBox(4, header, sub);
+        headerBox.setAlignment(Pos.CENTER);
+
+        TextField questionField = new TextField(q.questionText);
+        questionField.setPromptText("Question Text");
+        questionField.setStyle(INPUT_STYLE);
+        questionField.setPrefHeight(42);
+
+        TextField aField = new TextField(q.optionA);
+        aField.setPromptText("Option A");
+        aField.setStyle(INPUT_STYLE);
+        aField.setPrefHeight(38);
+
+        TextField bField = new TextField(q.optionB);
+        bField.setPromptText("Option B");
+        bField.setStyle(INPUT_STYLE);
+        bField.setPrefHeight(38);
+
+        TextField cField = new TextField(q.optionC);
+        cField.setPromptText("Option C");
+        cField.setStyle(INPUT_STYLE);
+        cField.setPrefHeight(38);
+
+        TextField dField = new TextField(q.optionD);
+        dField.setPromptText("Option D");
+        dField.setStyle(INPUT_STYLE);
+        dField.setPrefHeight(38);
+
+        ComboBox<String> correctCombo = new ComboBox<>();
+        correctCombo.getItems().addAll("Option A", "Option B", "Option C", "Option D");
+        switch (q.correctOption == null ? "A" : q.correctOption.toUpperCase(Locale.ROOT)) {
+            case "B": correctCombo.setValue("Option B"); break;
+            case "C": correctCombo.setValue("Option C"); break;
+            case "D": correctCombo.setValue("Option D"); break;
+            default:  correctCombo.setValue("Option A"); break;
+        }
+        correctCombo.setMaxWidth(Double.MAX_VALUE);
+        correctCombo.setStyle(COMBO_STYLE);
+        correctCombo.setPrefHeight(38);
+
+        TextField topicField = new TextField(q.topic);
+        topicField.setPromptText("Topic (e.g. Loops, OOP)");
+        topicField.setStyle(INPUT_STYLE);
+        topicField.setPrefHeight(38);
+
+        ComboBox<String> difficultyCombo = new ComboBox<>();
+        difficultyCombo.getItems().addAll("EASY", "MEDIUM", "HARD");
+        difficultyCombo.setValue(q.difficulty != null ? q.difficulty : "MEDIUM");
+        difficultyCombo.setMaxWidth(Double.MAX_VALUE);
+        difficultyCombo.setStyle(COMBO_STYLE);
+        difficultyCombo.setPrefHeight(38);
+
+        Label messageLabel = new Label();
+        messageLabel.setWrapText(true);
+        messageLabel.setMaxWidth(Double.MAX_VALUE);
+
+        Button removeBtn = new Button("🗑  Remove");
+        removeBtn.setPrefWidth(150);
+        removeBtn.setPrefHeight(44);
+        removeBtn.setStyle("-fx-background-color: #dc2626; -fx-text-fill: white; -fx-font-weight: bold; "
+                + "-fx-font-size: 14px; -fx-background-radius: 6; -fx-cursor: hand;");
+        removeBtn.setOnAction(e -> {
+            if (index < imported.size()) {
+                imported.remove(index);
+            }
+            onSaved.run();
+            showImportPreviewScreen(stage, user, draftTest, draftQuestions, fileName, result);
+        });
+
+        Button saveBtn = new Button("✓  Save Changes");
+        saveBtn.setPrefWidth(200);
+        saveBtn.setPrefHeight(44);
+        saveBtn.setStyle("-fx-background-color: #7c3aed; -fx-text-fill: white; -fx-font-weight: bold; "
+                + "-fx-font-size: 14px; -fx-background-radius: 6; -fx-cursor: hand;");
+
+        Button cancelBtn = new Button("Cancel");
+        cancelBtn.setPrefWidth(120);
+        cancelBtn.setPrefHeight(44);
+        cancelBtn.setStyle("-fx-background-color: #64748b; -fx-text-fill: white; -fx-font-weight: bold; "
+                + "-fx-font-size: 14px; -fx-background-radius: 6; -fx-cursor: hand;");
+        cancelBtn.setOnAction(e -> showImportPreviewScreen(stage, user, draftTest,
+                draftQuestions, fileName, result));
+
+        saveBtn.setOnAction(e -> {
+            String error = InputValidator.validateQuestion(questionField.getText(), aField.getText(),
+                    bField.getText(), cField.getText(), dField.getText());
+            if (error == null) {
+                error = InputValidator.validateTopic(topicField.getText());
+            }
+            if (error != null) {
+                showMessage(messageLabel, error, false);
+                return;
+            }
+
+            q.questionText = questionField.getText().trim();
+            q.optionA = aField.getText().trim();
+            q.optionB = bField.getText().trim();
+            q.optionC = cField.getText().trim();
+            q.optionD = dField.getText().trim();
+
+            String selected = correctCombo.getValue();
+            if ("Option B".equals(selected)) q.correctOption = "B";
+            else if ("Option C".equals(selected)) q.correctOption = "C";
+            else if ("Option D".equals(selected)) q.correctOption = "D";
+            else q.correctOption = "A";
+
+            q.topic = topicField.getText().trim().isEmpty() ? "General" : topicField.getText().trim();
+            q.difficulty = difficultyCombo.getValue();
+
+            if (index < imported.size()) {
+                imported.set(index, q);
+            }
+            onSaved.run();
+            showImportPreviewScreen(stage, user, draftTest, draftQuestions, fileName, result);
+        });
+
+        HBox navBox = new HBox(10, cancelBtn, removeBtn, saveBtn);
+        navBox.setAlignment(Pos.CENTER);
+
+        form.getChildren().addAll(
+                headerBox,
+                questionField,
+                aField, bField, cField, dField,
+                new Label("Correct Option:"), correctCombo,
+                topicField,
+                new Label("Difficulty:"), difficultyCombo,
+                messageLabel,
+                navBox
+        );
+
+        installScrollableScreen(stage, form, 750, 720);
+    }
+
+    /** Converts a parsed question into the wizard's mutable draft type. */
+    private static DraftQuestion toDraftQuestion(ParsedQuestion parsed) {
+        DraftQuestion draft = new DraftQuestion();
+        draft.questionText = parsed.getQuestionText();
+        draft.optionA = parsed.getOptionA();
+        draft.optionB = parsed.getOptionB();
+        draft.optionC = parsed.getOptionC();
+        draft.optionD = parsed.getOptionD();
+        draft.correctOption = parsed.getCorrectOption();
+        draft.topic = parsed.getTopic();
+        draft.difficulty = parsed.getDifficulty();
+        return draft;
     }
 
     // =========================================================================

@@ -45,6 +45,45 @@
             <version>9.1.0</version>
         </dependency>
 
+        <!--
+          Used by the "Upload Questions File" feature (com.quiz.importing):
+          PDFBox reads text out of PDF files and POI reads text out of Word .docx
+          files. Plain .txt files are read with the JDK alone.
+          Both are only reached from QuestionFileReader, so the rest of the app
+          does not depend on them.
+        -->
+        <dependency>
+            <groupId>org.apache.pdfbox</groupId>
+            <artifactId>pdfbox</artifactId>
+            <version>3.0.8</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>5.5.1</version>
+        </dependency>
+
+        <!--
+          POI logs through the Log4j 2 API. With no provider on the classpath it
+          prints "Log4j API could not find a logging provider" to stderr every time
+          the app starts, which looks like a fault to anyone reading the console.
+          These two tiny bridges route that logging to a discarding SLF4J backend,
+          so the console stays clean without pulling in a logging framework.
+          Neither jar is used by any application code.
+        -->
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-to-slf4j</artifactId>
+            <version>2.24.3</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-nop</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

@@ -11,15 +11,67 @@ full answer review afterwards.
 
 | Role | Capabilities |
 | --- | --- |
-| **Teacher** | Create classes with a shareable 6-character code, build tests with a two-step wizard, choose public or class-only visibility, review every student submission |
+| **Teacher** | Create classes with a shareable 6-character code, build tests with a two-step wizard (typing questions, or importing them from a file), choose public or class-only visibility, review every student submission |
 | **Student** | Register, join a class by code, see available tests, take a timed test, view score and a per-question answer review |
 
 - Animated water-bubble background on every screen
 - Per-test countdown timer with configurable expiry: **auto-submit** or **allow overtime**
   (overtime is recorded against the attempt)
 - Urdu (RTL) question authoring and display
+- **Bulk question import** from a PDF, Word `.docx` or `.txt` file, with a preview,
+  per-question editing and a list of anything that was skipped (see below)
 - Passwords stored as salted **PBKDF2-HMAC-SHA256** hashes, never plain text
 - The database and all six tables are created automatically on first run
+
+---
+
+## Importing questions from a file
+
+On **Create Test - Step 2**, "Upload Questions File" imports questions instead of
+typing them one by one. Manual entry is unchanged - this is an additional option, and
+the two can be combined in the same test.
+
+The file must follow this format (the same example is shown on the upload screen):
+
+```
+Q: <question text>
+A) <option A>
+B) <option B>
+C) <option C>
+D) <option D>
+Answer: <A, B, C, or D>
+Topic: <topic text>
+Difficulty: <EASY, MEDIUM, or HARD>
+```
+
+with a blank line between questions.
+
+| File type | Read with |
+| --- | --- |
+| `.txt` | the JDK, as UTF-8 |
+| `.pdf` | Apache PDFBox |
+| `.docx` | Apache POI |
+
+How the parser behaves:
+
+- **Order is preserved** - questions are stored in the order they appear in the file.
+- **Only the `Q:` line separates questions.** Blank lines are conventional but not
+  required, because text extracted from a PDF or Word file does not reliably keep them.
+- **Wrapped lines are joined.** Extraction breaks long lines wherever the page ends, so
+  any line that is not a keyword continues the field above it.
+- **`Topic` and `Difficulty` are optional** and default to `General` and `MEDIUM`. An
+  unrecognised difficulty also falls back to `MEDIUM`.
+- A block is **skipped and listed with its line number and reason** when it has no
+  question text, is missing one of the four options, has an option longer than the
+  `VARCHAR(500)` column, or has a missing or unreadable `Answer:`.
+- Anything before the first `Q:` line is treated as a heading and ignored.
+- A maximum of 200 questions per file; the rest are reported as skipped.
+- Keywords are matched case-insensitively: `Q:`, `Q1:`, `Question 2:`, `Answer:`/`Ans:`,
+  `Topic:`, `Difficulty:`; options may be written `A)`, `A.`, `A:` or `(A)`.
+
+**Nothing is saved until "Confirm & Save All"** on the preview screen, where each
+imported question can be edited or removed. The test and every question are then written
+on one connection in one transaction, so a failure cannot leave a half-saved test.
 
 ---
 
@@ -106,8 +158,8 @@ that puts JavaFX on the classpath rather than the module path.
 mvn test
 ```
 
-The test suite covers the two pieces of logic that were deliberately extracted out of
-the JavaFX `App` class so they could be tested without opening a window:
+The test suite covers the logic that was deliberately extracted out of the JavaFX `App`
+class so it could be tested without opening a window:
 
 - **`PasswordUtilTest`** — hashing and verification. The expected hashes were produced
   by an *independent* implementation (Python's `hashlib.pbkdf2_hmac`), so the tests
@@ -116,6 +168,18 @@ the JavaFX `App` class so they could be tested without opening a window:
 - **`InputValidatorTest`** — registration, class-code, and question validation, field
   length limits, duration parsing and formatting, plus a locale-independence regression
   test for class-code normalisation.
+- **`QuestionFileParserTest`** — the question-file format: the documented example, file
+  order, wrapped lines from PDF/DOCX extraction, keyword and option spellings, the
+  `General`/`MEDIUM` defaults, every skip reason, CRLF/BOM/non-breaking-space handling,
+  the 200-question cap, and that no input at all can make the parser throw.
+
+`QuestionFileReader`, which does the PDF/DOCX/TXT extraction, is not unit tested because
+it only wraps PDFBox and POI. It is verified end to end instead: real `.txt`, `.pdf` and
+`.docx` files (including a corrupt PDF, a corrupt DOCX, an oversized file and an old
+`.doc`) are run through `QuestionFileReader.readText` and then
+`QuestionFileParser.parse` — the same pair of calls the upload screen makes. Every error
+path is asserted to raise an `IOException` carrying a message meant for the teacher,
+never an unchecked exception.
 
 ---
 
@@ -123,7 +187,7 @@ the JavaFX `App` class so they could be tested without opening a window:
 
 ```
 .
-├── pom.xml                     Maven build (JavaFX 25, MySQL Connector/J, JUnit 5)
+├── pom.xml                     Maven build (JavaFX 25, MySQL Connector/J, PDFBox, POI, JUnit 5)
 ├── schema.sql                  Full database schema for manual import
 └── src
     ├── main/java/com/quiz
@@ -131,13 +195,20 @@ the JavaFX `App` class so they could be tested without opening a window:
     │   ├── Runner.java         IDE-friendly launcher (see above)
     │   ├── dao                 ClassDAO, ResultDAO, TestDAO, UserDAO
     │   ├── db/DBConnection     Connection settings + schema bootstrap
+    │   ├── importing           QuestionFileReader (PDF/DOCX/TXT text extraction),
+    │   │                       QuestionFileParser (the format), ParsedQuestion,
+    │   │                       ParseFailure, ImportResult
     │   ├── model               User, Question
     │   ├── security            PasswordUtil (PBKDF2 hashing)
     │   └── validation          InputValidator (all field rules)
     └── test/java/com/quiz
+        ├── importing/QuestionFileParserTest.java
         ├── security/PasswordUtilTest.java
         └── validation/InputValidatorTest.java
 ```
+
+The `importing` package holds no database or JavaFX code, which is what lets the whole
+file format be tested without a window or a server.
 
 ---
 
@@ -167,5 +238,5 @@ for bugs:
 - The "Planned number of questions" field in the test wizard is advisory — the wizard
   lets you save any number of questions, and the confirmation message reports the
   actual count.
-- `App.java` builds every screen in code and is over 2,000 lines long. Splitting each
+- `App.java` builds every screen in code and is over 2,700 lines long. Splitting each
   screen into its own class would be the natural next refactor.
