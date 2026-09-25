@@ -1,5 +1,6 @@
 package com.quiz.validation;
 
+import com.quiz.model.Question;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -219,6 +220,32 @@ class InputValidatorTest {
     }
 
     @Test
+    @DisplayName("a Question is refused while any of its fields is blank or over-long")
+    void validatesThePersistenceTypeToo() {
+        // The write path (TestDAO) calls this overload, so a question that slipped past a
+        // screen check can no longer be stored with blank options - MySQL accepts an empty
+        // string in a NOT NULL column and the student then saw empty radio buttons.
+        assertNull(InputValidator.validateQuestion(question("What is 2+2?", "3", "4", "5", "6")));
+
+        assertNotNull(InputValidator.validateQuestion(
+                question("Half-typed?", "", "", "", "")));
+        assertNotNull(InputValidator.validateQuestion(
+                question("Half-typed?", "3", "4", "", "6")));
+        assertNotNull(InputValidator.validateQuestion(
+                question("", "3", "4", "5", "6")));
+        assertNotNull(InputValidator.validateQuestion(null));
+
+        assertNotNull(InputValidator.validateQuestion(question(
+                "What is 2+2?", "o".repeat(InputValidator.OPTION_MAX_LENGTH + 1), "4", "5", "6")));
+        assertNotNull(InputValidator.validateQuestion(question(
+                "What is 2+2?", "3", "4", "5", "6",
+                "t".repeat(InputValidator.TOPIC_MAX_LENGTH + 1))));
+        assertNull(InputValidator.validateQuestion(question(
+                "What is 2+2?", "3", "4", "5", "6",
+                "t".repeat(InputValidator.TOPIC_MAX_LENGTH))));
+    }
+
+    @Test
     @DisplayName("topic is optional but length-capped")
     void enforcesTopicRules() {
         assertNull(InputValidator.validateTopic(null));
@@ -229,6 +256,15 @@ class InputValidatorTest {
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    private static Question question(String text, String a, String b, String c, String d) {
+        return question(text, a, b, c, d, "General");
+    }
+
+    private static Question question(String text, String a, String b, String c, String d,
+                                     String topic) {
+        return new Question(text, a, b, c, d, "A", topic, "MEDIUM");
+    }
 
     @Test
     @DisplayName("parsePositiveInt returns -1 for anything that is not a positive int")

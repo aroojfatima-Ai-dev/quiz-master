@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -82,6 +83,48 @@ class SchemaSeedTest {
                 "idx_results_student_id", "idx_results_test_id")) {
             assertTrue(sql.contains(index), "schema.sql is missing the index " + index);
         }
+    }
+
+    @Test
+    @DisplayName("the runtime bootstrap never adds a second foreign key on tests.class_id")
+    void runtimeBootstrapDoesNotDuplicateTheClassForeignKey() throws Exception {
+        Path bootstrap = Path.of("src/main/java/com/quiz/db/DBConnection.java");
+        assumeTrue(Files.exists(bootstrap), "the source tree is present");
+
+        String source = Files.readString(bootstrap, StandardCharsets.UTF_8);
+
+        // The CREATE TABLE for a fresh database already declares the constraint, and
+        // MySQL/MariaDB accept a second one on the same column, so the ALTER has to be
+        // guarded. Without the guard an application-created database carried a duplicate
+        // constraint that schema.sql does not declare, and every later start failed with a
+        // duplicate-key error and printed "DB migration skipped".
+        assertTrue(source.contains("hasForeignKeyOn(conn, \"tests\", \"class_id\")"),
+                "DBConnection must check for an existing foreign key before adding one");
+        assertTrue(source.contains("ADD CONSTRAINT fk_tests_class"),
+                "the migration for pre-class databases must still be there");
+    }
+
+    @Test
+    @DisplayName("schema.sql declares exactly one foreign key on tests.class_id")
+    void schemaFileDeclaresOneClassForeignKey() throws Exception {
+        Path schema = Path.of("schema.sql");
+        assumeTrue(Files.exists(schema), "schema.sql is part of the repository");
+
+        String sql = Files.readString(schema, StandardCharsets.UTF_8);
+
+        // Only the statements that make up the 'tests' table count; enrollments has its
+        // own (different) foreign key on a column of the same name.
+        int start = sql.indexOf("CREATE TABLE IF NOT EXISTS tests");
+        int end = sql.indexOf(";", start);
+        String testsTable = sql.substring(start, end < 0 ? sql.length() : end);
+
+        long declarations = testsTable.lines()
+                .filter(line -> line.contains("FOREIGN KEY (class_id)"))
+                .count();
+
+        assertEquals(1, (int) declarations,
+                "tests.class_id must have exactly one foreign key declaration, found "
+                        + declarations);
     }
 
     @Test

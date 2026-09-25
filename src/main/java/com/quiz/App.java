@@ -1380,6 +1380,28 @@ public class App extends Application {
                 return;
             }
 
+            // Re-check the whole draft list, not just the question on screen. The Back
+            // button and the upload button both save the current question without
+            // validating it, so a half-typed one can sit in the list; "Finish" used to
+            // persist it with blank options, and students then saw empty radio buttons.
+            List<String> problems = new ArrayList<>();
+            for (int i = 0; i < draftQuestions.size(); i++) {
+                DraftQuestion q = draftQuestions.get(i);
+                String error = InputValidator.validateQuestion(q.questionText, q.optionA,
+                        q.optionB, q.optionC, q.optionD);
+                if (error == null) {
+                    error = InputValidator.validateTopic(q.topic);
+                }
+                if (error != null) {
+                    problems.add("Q" + (i + 1) + ": " + error);
+                }
+            }
+            if (!problems.isEmpty()) {
+                showMessage(messageLabel, "These questions are incomplete — "
+                        + String.join("  |  ", problems), false);
+                return;
+            }
+
             try {
                 int totalTimeSeconds = draftTest.timeMinutes * 60;
 
@@ -1412,6 +1434,10 @@ public class App extends Application {
 
             } catch (SQLException ex) {
                 showMessage(messageLabel, "Failed to save test to database: " + ex.getMessage(), false);
+            } catch (IllegalArgumentException ex) {
+                // The DAO re-checks every question before writing; reaching this means a
+                // draft slipped past the screen checks above.
+                showMessage(messageLabel, ex.getMessage(), false);
             }
         });
 
@@ -1550,8 +1576,15 @@ public class App extends Application {
                     return;
                 }
 
+                // Working copy: the preview owns these until the teacher confirms, so
+                // cancelling leaves the manual draft exactly as it was.
+                List<DraftQuestion> imported = new ArrayList<>();
+                for (ParsedQuestion q : result.getQuestions()) {
+                    imported.add(toDraftQuestion(q));
+                }
+
                 showImportPreviewScreen(stage, user, draftTest, draftQuestions,
-                        chosen.getName(), result);
+                        chosen.getName(), imported, result.getFailures(), new int[]{ 0 });
                 return;
 
             } catch (IOException ex) {
@@ -1619,22 +1652,25 @@ public class App extends Application {
      * PREVIEW SCREEN: every parsed question in file order, plus the ones that were
      * skipped. Nothing is saved yet; each row can be edited or removed, and
      * "Confirm & Save All" writes the whole test in a single transaction.
+     *
+     * <p>The working list of imported questions is passed in rather than rebuilt from
+     * the parse result. Returning here used to re-derive it from
+     * {@code result.getQuestions()}, which threw away every edit and every removal the
+     * teacher had just made: editing a question and pressing "Save Changes" appeared to
+     * work, and the original text came straight back.
+     *
+     * @param imported     the working copy this preview owns until the teacher confirms
+     * @param failures     the blocks the parser skipped, to list under the questions
+     * @param removedCount shared count of rows removed here, so the "everything was
+     *                     removed" message survives a trip through the edit screen
      */
     private void showImportPreviewScreen(Stage stage, User user,
                                          DraftTestDetails draftTest,
                                          List<DraftQuestion> draftQuestions,
                                          String fileName,
-                                         ImportResult result) {
-
-        // Working copy: the preview owns these until the teacher confirms, so
-        // cancelling leaves the manual draft exactly as it was.
-        List<DraftQuestion> imported = new ArrayList<>();
-        for (ParsedQuestion q : result.getQuestions()) {
-            imported.add(toDraftQuestion(q));
-        }
-
-        final int[] removedCount = { 0 };
-        List<ParseFailure> failures = result.getFailures();
+                                         List<DraftQuestion> imported,
+                                         List<ParseFailure> failures,
+                                         final int[] removedCount) {
 
         VBox card = new VBox(14);
         card.setMaxWidth(680);
@@ -1691,6 +1727,11 @@ public class App extends Application {
         VBox listBox = new VBox(10);
         listBox.setAlignment(Pos.TOP_LEFT);
 
+        // Going to the edit screen and coming back must show the list as it was left,
+        // so the return trip rebuilds this screen from the same working list.
+        final Runnable returnToPreview = () -> showImportPreviewScreen(stage, user, draftTest,
+                draftQuestions, fileName, imported, failures, removedCount);
+
         final Runnable[] refresh = new Runnable[1];
         refresh[0] = () -> {
             listBox.getChildren().clear();
@@ -1746,7 +1787,7 @@ public class App extends Application {
                         + "-fx-font-size: 12px; -fx-background-radius: 5; -fx-cursor: hand;");
 
                 editBtn.setOnAction(e -> showImportEditQuestionScreen(stage, user, draftTest,
-                        draftQuestions, fileName, result, imported, refresh[0], index));
+                        draftQuestions, fileName, imported, returnToPreview, index));
 
                 removeBtn.setOnAction(e -> {
                     if (index < imported.size()) {
@@ -1781,16 +1822,31 @@ public class App extends Application {
         cancelBtn.setOnAction(e -> showWizardStep2QuestionScreen(stage, user, draftTest,
                 draftQuestions, draftQuestions.size()));
 
+        // Set once the test has been written, so a double click cannot create it twice.
+        final boolean[] alreadySaved = { false };
+
         confirmBtn.setOnAction(e -> {
+            if (alreadySaved[0]) {
+                return;
+            }
             if (imported.isEmpty()) {
                 showMessage(messageLabel, "There is nothing to save - every imported question was removed.", false);
                 return;
             }
 
-            // Re-check every question, because editing can leave one incomplete.
+            // Manual questions first (they were created first), then the imported ones
+            // in file order.
+            List<DraftQuestion> combined = new ArrayList<>(draftQuestions);
+            combined.addAll(imported);
+
+            // Re-check every question, manual and imported alike: editing can leave one
+            // incomplete, and the wizard's Back button keeps a half-typed question in the
+            // draft list. Checking only the imported rows let a blank manual question
+            // reach the database, where it is stored happily and then shown to students
+            // as four empty radio buttons.
             List<String> problems = new ArrayList<>();
-            for (int i = 0; i < imported.size(); i++) {
-                DraftQuestion q = imported.get(i);
+            for (int i = 0; i < combined.size(); i++) {
+                DraftQuestion q = combined.get(i);
                 String error = InputValidator.validateQuestion(q.questionText, q.optionA,
                         q.optionB, q.optionC, q.optionD);
                 if (error == null) {
@@ -1804,11 +1860,6 @@ public class App extends Application {
                 showMessage(messageLabel, "Please fix these before saving — " + String.join("  |  ", problems), false);
                 return;
             }
-
-            // Manual questions first (they were created first), then the imported ones
-            // in file order.
-            List<DraftQuestion> combined = new ArrayList<>(draftQuestions);
-            combined.addAll(imported);
 
             // Every question and the test itself are written on one connection in one
             // transaction. Using TestDAO.addQuestion() in a loop would instead commit
@@ -1827,6 +1878,7 @@ public class App extends Application {
                         draftTest.title, draftTest.language, draftTest.timeMinutes * 60,
                         draftTest.expiryAction, user.getId(),
                         draftTest.classId, draftTest.isPublic, questions);
+                alreadySaved[0] = true;
 
                 String successMsg = String.format(Locale.ROOT,
                         "Test '%s' created successfully with %d questions imported from %s!",
@@ -1835,6 +1887,10 @@ public class App extends Application {
 
             } catch (SQLException ex) {
                 showMessage(messageLabel, "Failed to save the imported questions: " + ex.getMessage(), false);
+            } catch (IllegalArgumentException ex) {
+                // The DAO re-checks every question before writing; reaching this means a
+                // draft slipped past the screen checks above.
+                showMessage(messageLabel, ex.getMessage(), false);
             } catch (RuntimeException ex) {
                 showMessage(messageLabel, "Unexpected problem while saving: " + ex.getMessage(), false);
             }
@@ -1848,12 +1904,17 @@ public class App extends Application {
     /**
      * EDIT SCREEN: edit one imported question. Matches the wizard's one-item-per-page
      * pattern; saving returns to the preview with the change applied in place.
+     *
+     * <p>{@code onSaved} is what returns to the preview. It used to be the preview's
+     * list-refresh runnable followed by a fresh {@link #showImportPreviewScreen} call,
+     * which rebuilt the working list from the original parse result and so discarded the
+     * very edit or removal being saved. It is now a single navigation that hands the same
+     * list back to the preview.
      */
     private void showImportEditQuestionScreen(Stage stage, User user,
                                               DraftTestDetails draftTest,
                                               List<DraftQuestion> draftQuestions,
                                               String fileName,
-                                              ImportResult result,
                                               List<DraftQuestion> imported,
                                               Runnable onSaved,
                                               int index) {
@@ -1942,7 +2003,6 @@ public class App extends Application {
                 imported.remove(index);
             }
             onSaved.run();
-            showImportPreviewScreen(stage, user, draftTest, draftQuestions, fileName, result);
         });
 
         Button saveBtn = new Button("✓  Save Changes");
@@ -1956,8 +2016,7 @@ public class App extends Application {
         cancelBtn.setPrefHeight(44);
         cancelBtn.setStyle("-fx-background-color: #64748b; -fx-text-fill: white; -fx-font-weight: bold; "
                 + "-fx-font-size: 14px; -fx-background-radius: 6; -fx-cursor: hand;");
-        cancelBtn.setOnAction(e -> showImportPreviewScreen(stage, user, draftTest,
-                draftQuestions, fileName, result));
+        cancelBtn.setOnAction(e -> onSaved.run());
 
         saveBtn.setOnAction(e -> {
             String error = InputValidator.validateQuestion(questionField.getText(), aField.getText(),
@@ -1989,7 +2048,6 @@ public class App extends Application {
                 imported.set(index, q);
             }
             onSaved.run();
-            showImportPreviewScreen(stage, user, draftTest, draftQuestions, fileName, result);
         });
 
         HBox navBox = new HBox(10, cancelBtn, removeBtn, saveBtn);

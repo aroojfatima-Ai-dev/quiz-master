@@ -2,6 +2,7 @@ package com.quiz.dao;
 
 import com.quiz.db.DBConnection;
 import com.quiz.model.Question;
+import com.quiz.validation.InputValidator;
 
 import java.sql.*;
 import java.util.ArrayList;
@@ -33,7 +34,9 @@ public class TestDAO {
      *
      * @param questions the questions to attach; must not be null or empty
      * @return the generated test id
-     * @throws IllegalArgumentException if no questions are supplied
+     * @throws IllegalArgumentException if no questions are supplied, or if any question
+     *                                  is incomplete (blank text or option, over-long
+     *                                  option or topic)
      * @throws SQLException             if the write fails, in which case the whole
      *                                  test is rolled back
      */
@@ -44,6 +47,7 @@ public class TestDAO {
         if (questions == null || questions.isEmpty()) {
             throw new IllegalArgumentException("A test must contain at least one question.");
         }
+        validate(questions);
 
         try (Connection conn = DBConnection.getConnection()) {
             conn.setAutoCommit(false);
@@ -96,6 +100,7 @@ public class TestDAO {
                                String topic, String difficulty) throws SQLException {
         Question question = new Question(questionText, optionA, optionB, optionC, optionD,
                 correctOption, topic, difficulty);
+        validate(List.of(question));
         try (Connection conn = DBConnection.getConnection()) {
             return insertQuestion(conn, testId, question);
         }
@@ -232,6 +237,25 @@ public class TestDAO {
     // ------------------------------------------------------------------
     // Internals
     // ------------------------------------------------------------------
+
+    /**
+     * Refuses an incomplete question before anything is written.
+     *
+     * <p>The screens validate their drafts, but this is the layer that actually promises
+     * the database is never handed a question with a blank option: MySQL accepts an empty
+     * string in a {@code NOT NULL} column, so such a question used to be stored without a
+     * murmur and then rendered for students as empty radio buttons.
+     *
+     * @throws IllegalArgumentException naming the first question that is not acceptable
+     */
+    private static void validate(List<Question> questions) {
+        for (int i = 0; i < questions.size(); i++) {
+            String error = InputValidator.validateQuestion(questions.get(i));
+            if (error != null) {
+                throw new IllegalArgumentException("Question " + (i + 1) + ": " + error);
+            }
+        }
+    }
 
     private int insertTest(Connection conn, String title, String language, int totalTimeSeconds,
                            String expiryAction, int createdByUserId,

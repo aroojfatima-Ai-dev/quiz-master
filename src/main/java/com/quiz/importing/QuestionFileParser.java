@@ -26,7 +26,8 @@ import java.util.regex.Pattern;
  * <p><b>Only the {@code Q:} line separates questions.</b> Blank lines between
  * questions are the documented convention, but they are not required, because text
  * pulled out of a PDF or DOCX does not reliably keep them. Questions come back in
- * exactly the order they appear in the file.
+ * exactly the order they appear in the file, and a skipped block is reported against
+ * the line it started on in the file as the teacher wrote it.
  *
  * <p><b>Wrapped lines are kept.</b> PDF and DOCX extraction breaks long lines
  * wherever the page happens to end, so any line that does not start with a known
@@ -105,17 +106,28 @@ public final class QuestionFileParser {
             Pattern.compile("(?<!\\S)([A-Da-d])\\s*[).:]");
 
     /**
+     * The keyword labels on their own, without the option markers.
+     *
+     * <p>{@link #splitInlineQuestion} uses this to tell an inline question apart from an
+     * ordinary line that merely enumerates option markers inside its own text.
+     */
+    private static final String KEYWORD_LABEL =
+            "(?<![\\p{Alnum}])"
+                    + "(?:(?i:question|q)\\s*\\.?\\s*\\d{0,4}\\s*[:).\\]-]"
+                    + "|(?i:(?:correct\\s+)?ans(?:wer)?)\\s*[:).\\-]"
+                    + "|(?i:topic)\\s*[:).\\-]"
+                    + "|(?i:difficulty|diff|level)\\s*[:).\\-])";
+
+    /**
      * Every label that can start a field inside a line: the keyword labels and the option
      * markers. Used only to cut an inline question into its fields, so the patterns are
      * anchored on a non-word character before the label (or whitespace for an option).
      */
     private static final Pattern INLINE_MARKER = Pattern.compile(
-            "(?<![\\p{Alnum}])"
-                    + "(?:(?i:question|q)\\s*\\.?\\s*\\d{0,4}\\s*[:).\\]-]"
-                    + "|(?i:(?:correct\\s+)?ans(?:wer)?)\\s*[:).\\]-]"
-                    + "|(?i:topic)\\s*[:).\\]-]"
-                    + "|(?i:difficulty|diff|level)\\s*[:).\\]-]"
-                    + "|(?<!\\S)[A-D]\\s*[).:])");
+            "(?:" + KEYWORD_LABEL + "|(?<!\\S)[A-D]\\s*[).:])");
+
+    /** {@link #KEYWORD_LABEL}, compiled once for the inline-question test. */
+    private static final Pattern KEYWORD_LABEL_PATTERN = Pattern.compile(KEYWORD_LABEL);
 
     private static final String[] OPTION_LETTERS = { "A", "B", "C", "D" };
 
@@ -142,14 +154,20 @@ public final class QuestionFileParser {
         }
 
         String text = normalise(rawText);
-        String[] lines = expandInlineQuestions(text).split("\n", -1);
+
+        // Expanding a single-line question turns one line of the file into several, so the
+        // original line number of every expanded line is carried alongside it. Without it a
+        // failure reported after an inline question pointed at a line that does not exist.
+        List<String> lines = new ArrayList<>();
+        List<Integer> lineNumbers = new ArrayList<>();
+        expandInlineQuestions(text, lines, lineNumbers);
 
         Block current = null;
         boolean capReported = false;
 
-        for (int i = 0; i < lines.length; i++) {
-            int lineNumber = i + 1;
-            String line = lines[i].strip();
+        for (int i = 0; i < lines.size(); i++) {
+            int lineNumber = lineNumbers.get(i);
+            String line = lines.get(i).strip();
 
             // Blank lines only ever separate blocks, so they carry no meaning here.
             if (line.isEmpty()) {
@@ -500,27 +518,30 @@ public final class QuestionFileParser {
      * shape the main loop expects.
      *
      * <p>Text files in particular are often written as
-     * {@code Q: Capital of France? A) Berlin B) Paris C) Madrid D) Rome Answer: B}. A line
-     * is only split when it holds all four option markers {@code A) B) C) D)} in order and
-     * the first of them is not at the start of the line, so an ordinary file - one field
-     * per line - is left exactly as it is.
+     * {@code Q: Capital of France? A) Berlin B) Paris C) Madrid D) Rome Answer: B}, or with
+     * the question on one line and its options on the next. A line is split when it holds
+     * all four option markers {@code A) B) C) D)} in order and either the first of them is
+     * not at the start of the line or the line also carries a keyword label, so an ordinary
+     * file - one field per line - is left exactly as it is.
      */
-    private static String expandInlineQuestions(String text) {
-        StringBuilder expanded = new StringBuilder(text.length());
+    private static void expandInlineQuestions(String text, List<String> outLines,
+                                             List<Integer> outLineNumbers) {
         String[] lines = text.split("\n", -1);
 
         for (int i = 0; i < lines.length; i++) {
-            if (i > 0) {
-                expanded.append('\n');
-            }
             List<String> fields = splitInlineQuestion(lines[i]);
             if (fields == null) {
-                expanded.append(lines[i]);
+                outLines.add(lines[i]);
+                outLineNumbers.add(i + 1);
                 continue;
             }
-            expanded.append(String.join("\n", fields));
+            // Every field of an expanded question keeps the line number it came from, so a
+            // skipped block is still reported against the line the teacher can see.
+            for (String field : fields) {
+                outLines.add(field);
+                outLineNumbers.add(i + 1);
+            }
         }
-        return expanded.toString();
     }
 
     /**
@@ -549,7 +570,19 @@ public final class QuestionFileParser {
                 }
             }
         }
-        if (expected < OPTION_LETTERS.length || !firstOptionIsMidLine) {
+        if (expected < OPTION_LETTERS.length) {
+            return null;
+        }
+
+        // A line whose first option marker is not at the start is an inline question by
+        // definition: "Q: Capital? A) ... B) ... C) ... D) ... Answer: B". A line that
+        // *starts* with an option marker is only split when it also carries a keyword
+        // label, which is what distinguishes
+        //     "A) Berlin B) Paris C) Madrid D) Rome Answer: B"
+        // (a natural way to write the options of the question on the line above) from an
+        // ordinary line that merely enumerates markers inside its own text, such as a
+        // wrapped option "A) the sequence A) 1 B) 2 C) 3 D) 4 is the key".
+        if (!firstOptionIsMidLine && !KEYWORD_LABEL_PATTERN.matcher(line).find()) {
             return null;
         }
 

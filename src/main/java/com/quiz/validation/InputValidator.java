@@ -1,5 +1,7 @@
 package com.quiz.validation;
 
+import com.quiz.model.Question;
+
 import java.util.Locale;
 import java.util.regex.Pattern;
 
@@ -225,6 +227,30 @@ public final class InputValidator {
             return "Each option must be at most " + OPTION_MAX_LENGTH + " characters.";
         }
         return null;
+    }
+
+    /**
+     * Validates one question as it is about to be written to the database.
+     *
+     * <p>Same rules as {@link #validateQuestion(String, String, String, String, String)},
+     * expressed over the persistence type so the write path itself can enforce them. The
+     * UI validates every question before saving, but a question that slipped through with
+     * a blank option used to be stored without complaint - MySQL accepts an empty string
+     * in a {@code NOT NULL} column - and the student then saw empty radio buttons.
+     *
+     * @param question the question to check; may be null
+     * @return null when acceptable, otherwise the message to display
+     */
+    public static String validateQuestion(Question question) {
+        if (question == null) {
+            return "Please enter question text and all 4 options before proceeding.";
+        }
+        String error = validateQuestion(question.getQuestionText(), question.getOptionA(),
+                question.getOptionB(), question.getOptionC(), question.getOptionD());
+        if (error == null) {
+            error = validateTopic(question.getTopic());
+        }
+        return error;
     }
 
     /**

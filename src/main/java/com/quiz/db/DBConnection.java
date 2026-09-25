@@ -2,6 +2,8 @@ package com.quiz.db;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -233,18 +235,78 @@ public final class DBConnection {
             //    column/constraint error simply means the migration already ran.
             migrateIgnoringDuplicate(st, "ALTER TABLE tests ADD COLUMN class_id INT NULL");
             migrateIgnoringDuplicate(st, "ALTER TABLE tests ADD COLUMN is_public BOOLEAN DEFAULT TRUE");
-            migrateIgnoringDuplicate(st, "ALTER TABLE tests ADD CONSTRAINT fk_tests_class "
-                    + "FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE SET NULL");
+
+            // The constraint is only added when there is not already one on
+            // tests.class_id. The CREATE TABLE above declares it for a new database, and
+            // MySQL/MariaDB happily accept a second foreign key on the same column, so an
+            // unconditional ALTER left an application-created database with a duplicate
+            // constraint that schema.sql does not declare - and every later start then
+            // failed with a duplicate-key error and printed "DB migration skipped",
+            // which reads like a fault.
+            if (!hasForeignKeyOn(conn, "tests", "class_id")) {
+                migrateIgnoringDuplicate(st, "ALTER TABLE tests ADD CONSTRAINT fk_tests_class "
+                        + "FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE SET NULL");
+            }
 
             // 8. The index declarations above only apply to a database created from
             //    scratch. These bring an existing database in line with schema.sql, which
-            //    declares the same five indexes; a duplicate index name (1061) is ignored.
-            migrateIgnoringDuplicate(st, "ALTER TABLE tests ADD INDEX idx_tests_created_by (created_by)");
-            migrateIgnoringDuplicate(st, "ALTER TABLE tests ADD INDEX idx_tests_class_id (class_id)");
-            migrateIgnoringDuplicate(st, "ALTER TABLE questions ADD INDEX idx_questions_test_id (test_id)");
-            migrateIgnoringDuplicate(st, "ALTER TABLE results ADD INDEX idx_results_student_id (student_id)");
-            migrateIgnoringDuplicate(st, "ALTER TABLE results ADD INDEX idx_results_test_id (test_id)");
+            //    declares the same five indexes. Each one is checked first, so an existing
+            //    database is not hit with five no-op ALTERs on every start.
+            addIndexIfMissing(conn, st, "tests", "idx_tests_created_by", "(created_by)");
+            addIndexIfMissing(conn, st, "tests", "idx_tests_class_id", "(class_id)");
+            addIndexIfMissing(conn, st, "questions", "idx_questions_test_id", "(test_id)");
+            addIndexIfMissing(conn, st, "results", "idx_results_student_id", "(student_id)");
+            addIndexIfMissing(conn, st, "results", "idx_results_test_id", "(test_id)");
         }
+    }
+
+    /**
+     * Reports whether a table already has a foreign key on the given column.
+     *
+     * <p>Needed because {@code ADD CONSTRAINT} is not rejected for duplicating an existing
+     * foreign key on the same column: it is accepted, and the schema silently ends up with
+     * two identical constraints.
+     */
+    private static boolean hasForeignKeyOn(Connection conn, String table, String column) {
+        String sql = "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
+                + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? "
+                + "AND REFERENCED_TABLE_NAME IS NOT NULL";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, table);
+            ps.setString(2, column);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() && rs.getInt(1) > 0;
+            }
+        } catch (SQLException e) {
+            // If the check itself fails, fall back to attempting the statement and letting
+            // migrateIgnoringDuplicate judge the result, exactly as before.
+            return false;
+        }
+    }
+
+    /** Reports whether a table already has an index of the given name. */
+    private static boolean hasIndex(Connection conn, String table, String indexName) {
+        String sql = "SELECT COUNT(*) FROM information_schema.STATISTICS "
+                + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, table);
+            ps.setString(2, indexName);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() && rs.getInt(1) > 0;
+            }
+        } catch (SQLException e) {
+            return false;
+        }
+    }
+
+    /** Adds a secondary index, unless the table already has one by that name. */
+    private static void addIndexIfMissing(Connection conn, Statement st, String table,
+                                          String indexName, String columns) throws SQLException {
+        if (hasIndex(conn, table, indexName)) {
+            return;
+        }
+        migrateIgnoringDuplicate(st, "ALTER TABLE " + table + " ADD INDEX " + indexName
+                + " " + columns);
     }
 
     /**

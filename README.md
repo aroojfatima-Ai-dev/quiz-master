@@ -188,6 +188,11 @@ class so it could be tested without opening a window:
   one line, several questions on one line, an answer written as text (and the ambiguous
   case that must *not* be guessed), difficulty synonyms, page breaks and non-breaking
   spaces, and that an ordinary one-field-per-line file is left alone.
+- **`QuestionFileLayoutTest`** — the layouts a teacher can reasonably produce that used to
+  be refused: the options and answer on one line under the question, a wrapped option that
+  enumerates markers and must *not* be cut apart, and that a skipped block is reported at
+  the line it is actually on rather than the line an expanded single-line question left
+  behind.
 - **`SampleFileTest`** — reads `samples/sample-questions.txt` through the reader and the
   parser together, so the sample teachers copy always parses.
 - **`SchemaSeedTest`** — reads `schema.sql` and verifies that the documented demo hashes
@@ -289,3 +294,22 @@ before the change.
 | 11 | A double click on "Finish & Save Test" could create the same test twice. | Both save handlers ignore a second click; a failed save still leaves the button usable. |
 | 12 | The demo accounts documented in `schema.sql` used placeholder hashes, so uncommenting the block produced accounts that could never log in - while the comment claimed they were real hashes of `teacher123` / `student123`. | Real hashes are in place (verified against a server), the class and enrolment seeding statements are included, and `SchemaSeedTest` fails the build if either hash stops matching its password. |
 | 13 | A few `String.format` calls on the student screens (countdown, "You scored x out of y", the results history, the answer review) used the default locale, which renders non-Latin digits in an otherwise English UI. | All user-visible formatting uses `Locale.ROOT`. |
+
+### Bugs found by exercising the import feature end to end
+
+Each of these was reproduced before being fixed - the import flow was driven with real
+`.txt`, `.pdf` and `.docx` files (including a PDF written by PDFBox itself, a scanned PDF
+with no text layer, a corrupt DOCX, a `.doc` renamed to `.docx` and an oversized file) and
+the saved tests were read back from a real MySQL/MariaDB server.
+
+| # | Problem | Fix |
+| --- | --- | --- |
+| 14 | Editing an imported question on the preview screen did nothing. The edit screen saved the change into the working list and then called `showImportPreviewScreen`, which rebuilt that list from `result.getQuestions()` - so the original text came straight back, and removing a question from the edit screen brought it back too. The "N questions found" count and the "everything was removed" note were reset by the same rebuild. | The preview screen now takes the working list, the failure list and the removal count as parameters, and the edit screen returns through a single navigation that hands the same list back. |
+| 15 | A double click on "Confirm & Save All" created the same test twice. The README claimed both save handlers ignored a second click, but only the manual "Finish" handler had the guard. | The import confirm handler has the same one-shot guard; a failed save still leaves the button usable. |
+| 16 | A half-typed question could be persisted. The wizard's **Back** and **Upload** buttons save the question on screen without validating it, and neither save path re-checked the questions already in the draft list - only the one on screen (manual) or only the imported rows (import). MySQL accepts an empty string in a `NOT NULL` column, so the test was created and students then saw four empty radio buttons. | Both save paths re-validate **every** question before writing and list which ones are incomplete, and `TestDAO` refuses an incomplete question itself (`InputValidator.validateQuestion(Question)`), so the database cannot be handed one again. |
+| 17 | The schema bootstrap declared the `tests.class_id` foreign key twice: once in `CREATE TABLE` and once in the migration `ALTER TABLE ... ADD CONSTRAINT fk_tests_class`. MySQL and MariaDB accept a second constraint on the same column, so an application-created database ended up with a duplicate that `schema.sql` does not declare - and every later start failed with a duplicate-key error and printed "DB migration skipped", which reads like a fault. | The migration checks `information_schema` first and only adds the constraint when there is not already one. The five `idx_...` indexes are added the same way, so an existing database is no longer hit with five no-op `ALTER`s on every start. |
+| 18 | A `.txt` written with the question on one line and its options plus the answer on the next (`Q: Capital of France?` / `A) Berlin B) Paris C) Madrid D) Rome Answer: B`) was rejected with "Missing option B", even though the line holds all four option markers in order - the documented condition for splitting it. | A line that starts with an option marker is now split too, provided it also carries a keyword label. A wrapped option that merely enumerates markers inside its own text is still left alone, so nothing is ever cut apart on a guess. |
+| 19 | A skipped block was reported at the wrong line whenever an earlier question had been written on one line: expanding that line into several changed the line count, so the reported number pointed at a line that does not exist in the file. | Each expanded field keeps the line number it came from, so every failure is reported against the line the teacher can actually see. |
+
+`QuestionFileLayoutTest` covers 18 and 19, `InputValidatorTest` covers 16 at the rule level,
+and `SchemaSeedTest` fails the build if the duplicate-constraint migration (17) comes back.
